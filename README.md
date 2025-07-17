@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/4r9un-mcp-kql-server-badge.png)](https://mseep.ai/app/4r9un-mcp-kql-server)
+
 # MCP KQL Server
 
 > **AI-Powered KQL Query Execution with Intelligent Schema Memory**
