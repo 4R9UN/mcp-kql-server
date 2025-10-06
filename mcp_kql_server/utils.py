@@ -31,6 +31,68 @@ from .constants import KQL_RESERVED_WORDS, get_dynamic_table_analyzer, get_dynam
 # Set up logger at module level
 logger = logging.getLogger(__name__)
 
+import asyncio
+
+def _is_retryable_exc(e: Exception) -> bool:
+    """Lightweight dynamic check for retryable exceptions (message-based)."""
+    try:
+        s = str(e).lower()
+        return any(k in s for k in ("timeout", "connection", "throttl", "unreachable", "refused", "kusto", "service"))
+    except Exception:
+        return False
+
+def retry_on_exception(max_attempts: int = 3, base_delay: float = 1.0, max_delay: float = 10.0):
+    """
+    Simple, dependency-free retry decorator that supports both sync and async functions.
+    Retries only when `_is_retryable_exc` returns True.
+    """
+    def deco(func):
+        if asyncio.iscoroutinefunction(func):
+            async def wrapped(*args, **kwargs):
+                delay = base_delay
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        return await func(*args, **kwargs)
+                    except Exception as e:
+                        if attempt == max_attempts or not _is_retryable_exc(e):
+                            raise
+                        await asyncio.sleep(min(delay, max_delay))
+                        delay *= 2
+            return wrapped
+        else:
+            def wrapped(*args, **kwargs):
+                import time
+                delay = base_delay
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        return func(*args, **kwargs)
+                    except Exception as e:
+                        if attempt == max_attempts or not _is_retryable_exc(e):
+                            raise
+                        time.sleep(min(delay, max_delay))
+                        delay *= 2
+            return wrapped
+    return deco
+
+def log_execution(func):
+    """Minimal execution logger decorator (sync+async)."""
+    if asyncio.iscoroutinefunction(func):
+        async def wrapped(*args, **kwargs):
+            start = datetime.now()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                logger.debug(f"{func.__name__} took {(datetime.now() - start).total_seconds():.2f}s")
+        return wrapped
+    else:
+        def wrapped(*args, **kwargs):
+            start = datetime.now()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                logger.debug(f"{func.__name__} took {(datetime.now() - start).total_seconds():.2f}s")
+        return wrapped
+
 
 class QueryProcessor:
     """

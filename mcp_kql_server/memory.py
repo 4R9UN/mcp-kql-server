@@ -406,9 +406,18 @@ class MemoryManager:
             
             return {}
 
+    async def get_schema_async(self, cluster_uri: str, database: str, table: str, enable_fallback: bool = True) -> Dict[str, Any]:
+        """
+        Async wrapper around the sync `get_schema` to allow non-blocking calls from async code.
+        Uses the existing lru_cache-backed get_schema for fast lookups.
+        """
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.get_schema, cluster_uri, database, table, enable_fallback)
+    
     def store_schema(
-        self, cluster_uri: str, database: str, table: str, schema_data: Dict[str, Any], samples: Optional[Dict[str, Any]] = None
-    ):
+            self, cluster_uri: str, database: str, table: str, schema_data: Dict[str, Any], samples: Optional[Dict[str, Any]] = None
+        ):
         """Store schema with the new AI-optimized structure and thread safety."""
         self._lock = _memory_lock
         self._lock.acquire()

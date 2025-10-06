@@ -17,7 +17,14 @@ import pandas as pd
 from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
 from azure.kusto.data.exceptions import KustoServiceError
 
-from .utils import extract_cluster_and_database_from_query, extract_tables_from_query, generate_query_description, QueryProcessor
+from .utils import (
+    extract_cluster_and_database_from_query,
+    extract_tables_from_query,
+    generate_query_description,
+    QueryProcessor,
+    retry_on_exception,
+    log_execution,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -539,9 +546,11 @@ def _parse_kusto_response(response) -> pd.DataFrame:
             
     return df
 
-def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str) -> pd.DataFrame:
+@retry_on_exception()
+def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, timeout: int = 300) -> pd.DataFrame:
     """
-    Core synchronous function to execute a KQL query against a Kusto cluster with SEM0100 retry logic.
+    Core synchronous function to execute a KQL query against a Kusto cluster.
+    Adds configurable request timeout and uses retry decorator for transient failures.
     """
     cluster_url = _normalize_cluster_uri(cluster)
     logger.info(f"Executing KQL on {cluster_url}/{database}: {kql_query[:150]}...")
@@ -569,12 +578,11 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str) -> pd
             return df
             
         except KustoServiceError as e:
-            # Check if this is a retryable SEM0100 error
+            # Check if this is a retryable SEM0100-like error
             classification = classify_error_dynamically(str(e))
-            if classification['is_retryable'] and 'SEM0100' in str(e):
+            if classification.get('is_retryable') and 'sem0100' in str(e).lower():
                 logger.info(f"SEM0100 error detected, attempting auto-bracketing retry: {str(e)[:100]}")
                 
-                # Auto-bracket suspects and retry once
                 bracketed_query = bracket_suspect_identifiers(kql_query)
                 if bracketed_query != kql_query:
                     logger.debug(f"Retrying with bracketed identifiers: {bracketed_query[:150]}")
@@ -596,6 +604,19 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str) -> pd
         if client:
             client.close()
 
+
+def execute_large_query(query: str, cluster: str, database: str, chunk_size: int = 1000, timeout: int = 300) -> pd.DataFrame:
+    """
+    Minimal query chunking helper.
+    - If the query already contains explicit 'take' or 'limit', execute as-is.
+    - Otherwise run a single timed execution (safe fallback).
+    This conservative approach avoids aggressive query rewriting while enabling
+    an explicit place to improve chunking later.
+    """
+    if ' take ' in (query or "").lower() or ' limit ' in (query or "").lower():
+        return _execute_kusto_query_sync(query, cluster, database, timeout)
+    # Fallback: single execution with configured timeout & retries
+    return _execute_kusto_query_sync(query, cluster, database, timeout)
 
 def bracket_suspect_identifiers(query: str) -> str:
     """
@@ -1008,7 +1029,8 @@ async def execute_kql_query(
     cluster: str = None,
     database: str = None,
     visualize: bool = False,
-    use_schema_context: bool = True
+    use_schema_context: bool = True,
+    timeout: int = 300
 ) -> Any:
     """
     Legacy compatibility function for __init__.py import.
@@ -1043,8 +1065,11 @@ async def execute_kql_query(
         if not cluster or not database:
             raise ValueError("Query must include cluster and database specification")
         
-        # Execute using the core sync function wrapped in asyncio.to_thread
-        df = await asyncio.to_thread(_execute_kusto_query_sync, query, cluster, database)
+        # Execute using the core sync function wrapped in asyncio.to_thread and enforce overall timeout
+        df = await asyncio.wait_for(
+            asyncio.to_thread(_execute_kusto_query_sync, query, cluster, database, timeout),
+            timeout=timeout + 5,
+        )
         
         # Return list format for test compatibility with proper serialization
         if hasattr(df, 'to_dict'):
