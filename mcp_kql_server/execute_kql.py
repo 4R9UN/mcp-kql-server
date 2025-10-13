@@ -23,7 +23,6 @@ from .utils import (
     generate_query_description,
     QueryProcessor,
     retry_on_exception,
-    log_execution,
 )
 
 logger = logging.getLogger(__name__)

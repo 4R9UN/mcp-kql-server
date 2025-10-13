@@ -18,20 +18,19 @@ Functions implemented here:
  - fix_query_with_real_schema
  - generate_query_description
 """
-from pathlib import Path
+import asyncio
+import json
+import logging
 import os
 import re
-import logging
-import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .constants import KQL_RESERVED_WORDS, get_dynamic_table_analyzer, get_dynamic_column_analyzer
 
 # Set up logger at module level
 logger = logging.getLogger(__name__)
-
-import asyncio
 
 def _is_retryable_exc(e: Exception) -> bool:
     """Lightweight dynamic check for retryable exceptions (message-based)."""
