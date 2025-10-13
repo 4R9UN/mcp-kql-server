@@ -1848,16 +1848,32 @@ class SchemaManager:
                     schema_json_str = schema_result[0][next(iter(schema_result[0]))]
                     schema_json = json.loads(schema_json_str)
 
+                    # Get sample data for all columns
+                    sample_data = {}
+                    try:
+                        bracketed_table = bracket_if_needed(table)
+                        sample_query = f"{bracketed_table} | take 2"
+                        sample_result = await self._execute_kusto_async(sample_query, cluster, database, is_mgmt=False)
+                        
+                        if sample_result and len(sample_result) > 0:
+                            # Extract sample values for each column
+                            for col_name in [col['Name'] for col in schema_json.get('Schema', {}).get('OrderedColumns', [])]:
+                                sample_values = [str(row.get(col_name, '')) for row in sample_result[:2] if row.get(col_name) is not None]
+                                sample_data[col_name] = sample_values
+                    except Exception as sample_error:
+                        logger.debug(f"Failed to get sample data for Strategy 1: {sample_error}")
+
                     # Enhanced transformation with proper column metadata
                     columns = {}
                     for col in schema_json.get('Schema', {}).get('OrderedColumns', []):
                         col_name = col['Name']
                         col_type = col['CslType']
+                        sample_values = sample_data.get(col_name, [])
                         columns[col_name] = {
                             'data_type': col_type,
-                            'description': self._generate_column_description(table, col_name, col_type, []),
+                            'description': self._generate_column_description(table, col_name, col_type, sample_values),
                             'tags': self._generate_column_tags(col_name, col_type),
-                            'sample_values': [],
+                            'sample_values': sample_values,
                             'ordinal': col.get('Ordinal', 0),
                             'column_type': col_type
                         }
@@ -1876,6 +1892,22 @@ class SchemaManager:
                 getschema_result = await self._execute_kusto_async(getschema_query, cluster, database, is_mgmt=False)
                 
                 if getschema_result and len(getschema_result) > 0:
+                    # Get sample data for all columns
+                    sample_data = {}
+                    try:
+                        sample_query = f"{bracketed_table} | take 2"
+                        sample_result = await self._execute_kusto_async(sample_query, cluster, database, is_mgmt=False)
+                        
+                        if sample_result and len(sample_result) > 0:
+                            # Extract sample values for each column
+                            for row_data in getschema_result:
+                                col_name = row_data.get('ColumnName') or row_data.get('Column')
+                                if col_name:
+                                    sample_values = [str(row.get(col_name, '')) for row in sample_result[:2] if row.get(col_name) is not None]
+                                    sample_data[col_name] = sample_values
+                    except Exception as sample_error:
+                        logger.debug(f"Failed to get sample data for Strategy 2: {sample_error}")
+                    
                     columns = {}
                     for i, row in enumerate(getschema_result):
                         col_name = row.get('ColumnName') or row.get('Column') or f'Column{i}'
@@ -1884,11 +1916,12 @@ class SchemaManager:
                         # Clean up data type
                         col_type = str(col_type).replace('System.', '').lower()
                         
+                        sample_values = sample_data.get(col_name, [])
                         columns[col_name] = {
                             'data_type': col_type,
-                            'description': self._generate_column_description(table, col_name, col_type, []),
+                            'description': self._generate_column_description(table, col_name, col_type, sample_values),
                             'tags': self._generate_column_tags(col_name, col_type),
-                            'sample_values': [],
+                            'sample_values': sample_values,
                             'ordinal': row.get('ColumnOrdinal', i),
                             'column_type': col_type
                         }

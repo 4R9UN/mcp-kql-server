@@ -18,7 +18,7 @@ from .execute_kql import execute_kql_query
 from .mcp_server import main
 
 # Version information
-__version__ = "2.0.6"
+__version__ = "2.0.7"
 __author__ = "Arjun Trivedi"
 __email__ = "arjuntrivedi42@yahoo.com"
 

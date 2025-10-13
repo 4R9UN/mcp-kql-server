@@ -1,14 +1,14 @@
 # MCP KQL Server Architecture
 
-**Version**: 2.0.6  
-**Author**: Arjun Trivedi  
+**Version**: 2.0.7
+**Author**: Arjun Trivedi
 **Email**: arjuntrivedi42@yahoo.com
 
 ## 1. System Overview
 
 The MCP KQL Server is an intelligent, AI-augmented service designed to execute Kusto Query Language (KQL) queries against Azure Data Explorer. It leverages the Model Context Protocol (MCP) to expose its capabilities as tools that AI models can consume. The server's core mission is to provide a seamless, zero-configuration experience for developers and AI agents, enhanced by intelligent schema caching, robust error handling, and a sophisticated query processing pipeline.
 
-This document details the server's architecture, data flow, and key components, reflecting the significant refactoring in version 2.0.6.
+This document details the server's architecture, data flow, and key components, reflecting the significant refactoring in version 2.0.7.
 
 ## 2. High-Level Architecture
 
@@ -24,7 +24,7 @@ The architecture is designed around a central processing pipeline that validates
                                   │ MCP Protocol (Tools: execute_kql_query, schema_memory)
                                   ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    MCP KQL Server (v2.0.6)                      │
+│                    MCP KQL Server (v2.0.7)                      │
 │                                                                 │
 │ ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐ │
 │ │  `mcp_server`   │   │  `kql_auth`     │   │   `memory`      │ │
@@ -91,7 +91,7 @@ The server's logic is modularized into several key Python files, each with a dis
     - **Persistence**: Ensures that learned schemas and query history are persisted across server restarts.
 
 ### 3.4. `utils.py` - The Central Processing Pipeline
-This module, new in v2.0.6, centralizes the core business logic into a set of cohesive helper classes.
+This module, introduced in v2.0.6, centralizes the core business logic into a set of cohesive helper classes.
 
 - **`QueryProcessor`**:
     - **Purpose**: Standardizes the pre-execution query pipeline.
@@ -198,4 +198,4 @@ sequenceDiagram
 
 ## 6. Conclusion
 
-The v2.0.6 architecture of the MCP KQL Server represents a mature, robust, and intelligent system. By centralizing logic in the `utils.py` pipeline and introducing dynamic schema analysis via `constants.py`, the server is more maintainable, extensible, and powerful. The clear separation of concerns—from authentication (`kql_auth.py`) to memory (`memory.py`) to execution (`execute_kql.py`)—creates a solid foundation for future enhancements.
+The v2.0.7 architecture of the MCP KQL Server represents a mature, robust, and intelligent system. By centralizing logic in the `utils.py` pipeline and introducing dynamic schema analysis via `constants.py`, the server is more maintainable, extensible, and powerful. The clear separation of concerns—from authentication (`kql_auth.py`) to memory (`memory.py`) to execution (`execute_kql.py`)—creates a solid foundation for future enhancements.

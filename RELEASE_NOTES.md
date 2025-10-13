@@ -2,6 +2,103 @@
 
 ---
 
+## 🐛 **v2.0.7 - Bug Fix Release: Sample Values & Query Timeout**
+
+> **Bug Fix Release** 🛠️
+
+**Release Date**: October 13, 2025
+**Author**: Arjun Trivedi
+**Email**: arjuntrivedi42@yahoo.com
+**Repository**: https://github.com/4R9UN/mcp-kql-server
+
+### 🚀 **What's Fixed in v2.0.7**
+
+This release addresses critical bugs in the schema discovery system that were preventing sample values from being populated and causing query timeout issues.
+
+#### **1. Sample Values Bug Fix**
+- **🔧 Fixed Empty Sample Values**: Resolved issue where `sample_values` field was returning empty arrays in schema discovery
+- **📊 Data Population**: All three schema discovery strategies now properly execute `| take 2` queries to fetch actual sample data
+- **✅ Consistent Behavior**: Strategy 1 (JSON Schema) and Strategy 2 (getschema) now match Strategy 3's working implementation
+- **🎯 Real Data Examples**: AI-enhanced column descriptions now have access to actual table data for better context
+
+#### **2. Query Timeout Improvements**
+- **⚡ Enhanced Error Handling**: Improved handling of query timeout scenarios
+- **🛠️ Better Error Messages**: More informative error messages when queries time out
+- **📝 Logging Enhancements**: Better debugging information for timeout-related issues
+
+### 🔧 **Technical Changes**
+
+#### **Schema Discovery Enhancement ([`utils.py`](mcp_kql_server/utils.py))**
+
+**Strategy 1 - JSON Schema Discovery (Lines 1841-1867)**:
+- Added sample data query execution after schema discovery
+- Extracts sample values for each column from `| take 2` results
+- Populates `sample_values` with actual table data
+- Includes error handling for sample data retrieval failures
+
+**Strategy 2 - getschema Discovery (Lines 1871-1913)**:
+- Added sample data query execution after getschema
+- Extracts sample values for each column from `| take 2` results
+- Populates `sample_values` with actual table data
+- Includes error handling for sample data retrieval failures
+
+**Key Implementation Pattern**:
+```python
+# Get sample data for all columns
+sample_data = {}
+try:
+    bracketed_table = bracket_if_needed(table)
+    sample_query = f"{bracketed_table} | take 2"
+    sample_result = await self._execute_kusto_async(sample_query, cluster, database, is_mgmt=False)
+    
+    if sample_result and len(sample_result) > 0:
+        # Extract sample values for each column
+        sample_values = [str(row.get(col_name, '')) for row in sample_result[:2]
+                        if row.get(col_name) is not None]
+        sample_data[col_name] = sample_values
+except Exception as sample_error:
+    logger.debug(f"Failed to get sample data: {sample_error}")
+```
+
+### 🐛 **Bug Fixes**
+
+#### **Critical Fixes**
+- **Sample Values Population**: Fixed bug where Strategy 1 and Strategy 2 weren't fetching actual sample data from tables
+- **Query Execution**: Ensured `| take 2` queries execute properly to populate sample values
+- **Error Handling**: Added proper error handling for sample data retrieval to prevent schema discovery failures
+- **Consistency**: All three schema discovery strategies now behave identically regarding sample values
+
+#### **Impact**
+- **AI Context**: AI models now receive actual data samples for better column understanding
+- **Query Generation**: Improved natural language to KQL query generation with real data context
+- **Schema Intelligence**: Enhanced schema descriptions with actual value examples
+
+### 📦 **Installation & Upgrade**
+
+#### **New Installation**
+```bash
+pip install mcp-kql-server==2.0.7
+```
+
+#### **Upgrade from Previous Versions**
+```bash
+pip install --upgrade mcp-kql-server
+```
+
+### 🎯 **Benefits**
+- **Enhanced AI Context**: AI models now have access to real sample values for better understanding
+- **Improved Query Generation**: Better natural language to KQL conversion with actual data examples
+- **Consistent Behavior**: All schema discovery strategies now provide complete information
+- **Better Debugging**: Enhanced error messages and logging for troubleshooting
+
+### ✅ **Quality Assurance**
+- **Schema Discovery**: Verified all three strategies now populate sample values correctly
+- **Query Execution**: Confirmed `| take 2` queries execute successfully across different tables
+- **Error Handling**: Validated proper error handling when sample data retrieval fails
+- **Backward Compatibility**: Changes are fully backward compatible with existing implementations
+
+---
+
 ## 🚀 **v2.0.6 - Architectural Refactoring & Intelligence Upgrade**
 
 > **Major Refactor Release**  архитектура
