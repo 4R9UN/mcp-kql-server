@@ -22,7 +22,7 @@ from .utils import (
     extract_tables_from_query,
     generate_query_description,
     QueryProcessor,
-    retry_on_exception,
+    retry_on_exception
 )
 
 logger = logging.getLogger(__name__)
