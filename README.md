@@ -187,7 +187,7 @@ Add to your VSCode MCP configuration:
 				"mcp_kql_server"
 			],
 			"type": "stdio"
-		},
+		}
 }
 ```
 
