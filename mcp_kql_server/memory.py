@@ -77,7 +77,6 @@ def get_kql_operator_syntax_guidance() -> str:
     Returns:
         Formatted string with KQL operator syntax rules and examples.
     """
-    from .constants import KQL_OPERATOR_GUIDELINES
     
     guidance = """
 === KQL OPERATOR SYNTAX RULES ===

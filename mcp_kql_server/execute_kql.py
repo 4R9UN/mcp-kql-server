@@ -400,7 +400,7 @@ def validate_kql_query_syntax(query: str) -> Tuple[bool, str]:
         # CONSERVATIVE VALIDATION: Only check for critical syntax errors
 
         # 0. Check for invalid KQL operators (NEW: prevents common AI generation errors)
-        from .constants import KQL_INVALID_OPERATOR_PATTERN, KQL_INVALID_OPERATORS
+        from .constants import KQL_INVALID_OPERATOR_PATTERN
         invalid_op_match = KQL_INVALID_OPERATOR_PATTERN.search(query_clean)
         if invalid_op_match:
             invalid_op = invalid_op_match.group(0)
@@ -409,7 +409,7 @@ def validate_kql_query_syntax(query: str) -> Tuple[bool, str]:
                 correct_op = invalid_op.replace('! ', '!')
                 return False, f"Invalid operator '{invalid_op}' with space. Use '{correct_op}' (no space between ! and operator), or use 'not' keyword: 'not (condition)'"
             elif '!has_any' in invalid_op.lower():
-                return False, f"Invalid operator '!has_any' does not exist. Use '!in' for list exclusion: 'column !in (list)', or 'not (column has_any (list))'"
+                return False, "Invalid operator '!has_any' does not exist. Use '!in' for list exclusion: 'column !in (list)', or 'not (column has_any (list))'"
             else:
                 return False, f"Invalid KQL operator: '{invalid_op}'. Check KQL operator syntax."
 
