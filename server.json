@@ -1,17 +1,12 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
-  "title": "MCP KQL Server",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
   "name": "io.github.4R9UN/mcp-kql-server",
+  "title": "MCP KQL Server",
   "description": "Execute KQL in AI prompts via NL2KQL with schema discovery and Azure Data Explorer integration",
-  "repository": {
-    "url": "https://github.com/4R9UN/mcp-kql-server",
-    "source": "github"
-  },
   "version": "2.0.8",
   "packages": [
     {
       "registryType": "pypi",
-      "registryBaseUrl": "https://pypi.org",
       "identifier": "mcp-kql-server",
       "version": "2.0.8",
       "transport": {

@@ -1,8 +1,10 @@
 # MCP KQL Server
 
+mcp-name: io.github.4R9UN/mcp-kql-server
+
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/4r9un-mcp-kql-server-badge.png)](https://mseep.ai/app/4r9un-mcp-kql-server)
 
-> **AI-Powered KQL Query Execution with Natural Language to KQL (NL2KQL) Conversion and Execution **
+> **AI-Powered KQL Query Execution with Natural Language to KQL (NL2KQL) Conversion and Execution**
 
 A Model Context Protocol (MCP) server that transforms natural language questions into optimized KQL queries with intelligent schema discovery, AI-powered caching, and seamless Azure Data Explorer integration. Simply ask questions in plain English and get instant, accurate KQL queries with context-aware results.
 
