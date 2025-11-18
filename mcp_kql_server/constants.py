@@ -12,11 +12,11 @@ Email: arjuntrivedi42@yahoo.com
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 # Version information
-__version__ = "2.0.7"
+__version__ = "2.0.8"
 VERSION = __version__
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
@@ -85,7 +85,7 @@ Perfect for SOC analysts, threat hunters, and security researchers working with 
 
 # FastAPI Configuration
 FASTAPI_TITLE = "MCP KQL Local AI Agent"
-FASTAPI_VERSION = "2.0.7"
+FASTAPI_VERSION = "2.0.8"
 FASTAPI_DESCRIPTION = "Local AI-powered KQL Server with no external dependencies"
 FASTAPI_HOST = "0.0.0.0"
 FASTAPI_PORT = 8000
@@ -256,6 +256,130 @@ KQL_OPERATORS = frozenset({
     "union",
     "where",
 })
+
+# ============================================================================
+# KQL OPERATOR SYNTAX GUIDANCE FOR AI QUERY GENERATION
+# ============================================================================
+# These constants provide comprehensive guidance for correct KQL operator syntax
+# to prevent common errors in AI-generated queries.
+
+# Valid KQL comparison operators (NO spaces allowed)
+KQL_COMPARISON_OPERATORS = frozenset({
+    "==",   # Equal
+    "!=",   # Not equal (NO SPACE: correct is "!=", not "! =")
+    "<",    # Less than
+    "<=",   # Less than or equal
+    ">",    # Greater than
+    ">=",   # Greater than or equal
+    "=~",   # Case-insensitive equal
+    "!~",   # Case-insensitive not equal (NO SPACE)
+})
+
+# Valid KQL string operators (NO spaces in negations)
+KQL_STRING_OPERATORS = frozenset({
+    "contains",       # Contains substring
+    "!contains",      # Does not contain (NO SPACE: correct is "!contains", not "! contains")
+    "contains_cs",    # Contains case-sensitive
+    "!contains_cs",   # Does not contain case-sensitive (NO SPACE)
+    "has",            # Has whole term (word boundary)
+    "!has",           # Does not have term (NO SPACE: correct is "!has", not "! has")
+    "has_cs",         # Has term case-sensitive
+    "!has_cs",        # Does not have term case-sensitive (NO SPACE)
+    "hasprefix",      # Has prefix
+    "!hasprefix",     # Does not have prefix (NO SPACE)
+    "hassuffix",      # Has suffix
+    "!hassuffix",     # Does not have suffix (NO SPACE)
+    "startswith",     # Starts with
+    "!startswith",    # Does not start with (NO SPACE)
+    "startswith_cs",  # Starts with case-sensitive
+    "!startswith_cs", # Does not start with case-sensitive (NO SPACE)
+    "endswith",       # Ends with
+    "!endswith",      # Does not end with (NO SPACE)
+    "endswith_cs",    # Ends with case-sensitive
+    "!endswith_cs",   # Does not end with case-sensitive (NO SPACE)
+    "matches regex",  # Matches regular expression
+    "in~",            # Case-insensitive in list
+    "!in~",           # Case-insensitive not in list (NO SPACE)
+})
+
+# Valid KQL list/set operators (NO spaces in negations)
+KQL_LIST_OPERATORS = frozenset({
+    "in",       # In list (use this for checking if value is in a list)
+    "!in",      # Not in list (NO SPACE: correct is "!in", not "! in" or "!has_any")
+    "in~",      # Case-insensitive in list
+    "!in~",     # Case-insensitive not in list (NO SPACE)
+    "has_any",  # Has any of the terms (for arrays/dynamic columns)
+    "has_all",  # Has all of the terms
+})
+
+# IMPORTANT: Invalid operators that should NEVER be used
+KQL_INVALID_OPERATORS = frozenset({
+    "! =",        # WRONG: Use "!=" instead (no space)
+    "! in",       # WRONG: Use "!in" instead (no space)
+    "! has",      # WRONG: Use "!has" instead (no space)
+    "! contains", # WRONG: Use "!contains" instead (no space)
+    "! startswith", # WRONG: Use "!startswith" instead (no space)
+    "! endswith",   # WRONG: Use "!endswith" instead (no space)
+    "!has_any",   # WRONG: Use "!in" for negating list membership, or "not (col has_any (list))"
+})
+
+# KQL operator usage guidelines for AI query generation
+KQL_OPERATOR_GUIDELINES = {
+    "negation_syntax": {
+        "description": "KQL negation operators must NOT have spaces between ! and the operator",
+        "correct_examples": [
+            "where Status != 'Active'",
+            "where Name !contains 'test'",
+            "where Category !in ('A', 'B', 'C')",
+            "where Title !has 'error'",
+            "where Path !startswith '/temp'",
+            "where not (Status == 'Active')",  # Alternative using 'not' keyword
+        ],
+        "incorrect_examples": [
+            "where Status ! = 'Active'",  # WRONG: Space between ! and =
+            "where Name ! contains 'test'",  # WRONG: Space between ! and contains
+            "where Category ! in ('A', 'B', 'C')",  # WRONG: Space between ! and in
+            "where Category !has_any ('A', 'B', 'C')",  # WRONG: !has_any doesn't exist
+        ],
+    },
+    "list_membership": {
+        "description": "Use 'in' for list membership, '!in' for negation (not !has_any)",
+        "correct_examples": [
+            "where RuleName in ('Rule1', 'Rule2', 'Rule3')",  # Check if in list
+            "where RuleName !in ('Rule1', 'Rule2', 'Rule3')", # Exclude from list
+            "where Category has_any ('cat1', 'cat2')",  # For dynamic/array columns
+            "where not (RuleName in ('Rule1', 'Rule2'))",  # Alternative negation
+        ],
+        "incorrect_examples": [
+            "where RuleName !has_any ('Rule1', 'Rule2')",  # WRONG: !has_any doesn't exist
+            "where RuleName ! in ('Rule1', 'Rule2')",  # WRONG: Space in operator
+        ],
+    },
+    "alternative_negation": {
+        "description": "Alternative: use 'not' keyword for negation",
+        "examples": [
+            "where not (Status == 'Active')",
+            "where not (Name contains 'test')",
+            "where not (Category in ('A', 'B', 'C'))",
+        ],
+    },
+    "string_matching": {
+        "description": "Choose appropriate string operator based on match requirements",
+        "operators": {
+            "has": "Whole word/term matching (use for exact terms)",
+            "contains": "Substring matching (use for partial matches)",
+            "startswith": "Prefix matching",
+            "endswith": "Suffix matching",
+            "matches regex": "Pattern matching",
+        },
+    },
+}
+
+# Regex pattern to detect invalid operators in queries
+KQL_INVALID_OPERATOR_PATTERN = re.compile(
+    r'!\s+(=|in|has|contains|startswith|endswith)|!has_any',
+    re.IGNORECASE
+)
 
 # Natural language indicators
 NL_INDICATORS = {
@@ -541,16 +665,16 @@ class DynamicSchemaAnalyzer:
     Replace static patterns with dynamic analysis.
     This class provides methods for dynamic table and column analysis.
     """
-    
+
     @staticmethod
-    def analyze_table_semantics(table_name: str, sample_data: List[Dict] = None) -> Dict[str, Any]:
+    def analyze_table_semantics(table_name: str, sample_data: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Dynamically analyze table purpose from actual data patterns.
         Replaces static keyword-based table categorization.
         """
         if not table_name:
             return {"purpose": "unknown", "confidence": 0.0}
-        
+
         # Dynamic analysis based on data patterns
         analysis = {
             "purpose": "data_table",
@@ -559,78 +683,78 @@ class DynamicSchemaAnalyzer:
             "key_columns": [],
             "relationships": []
         }
-        
+
         # Analyze sample data if available
         if sample_data and len(sample_data) > 0:
             analysis.update(DynamicSchemaAnalyzer._analyze_data_patterns(sample_data))
-        
+
         # Table name pattern analysis (dynamic, not hardcoded keywords)
         analysis.update(DynamicSchemaAnalyzer._analyze_table_name_patterns(table_name))
-        
+
         return analysis
-    
+
     @staticmethod
     def _analyze_data_patterns(sample_data: List[Dict]) -> Dict[str, Any]:
         """Analyze actual data patterns to determine table characteristics."""
         if not sample_data:
             return {}
-        
+
         patterns = {
             "has_timestamps": False,
             "has_identifiers": False,
             "has_metrics": False,
             "data_quality": "unknown"
         }
-        
+
         # Check for common column patterns in data
         first_row = sample_data[0] if sample_data else {}
-        
-        for column, value in first_row.items():
+
+        for value in first_row.values():
             if value is None:
                 continue
-                
+
             value_str = str(value)
-            
+
             # Detect temporal patterns
             if DynamicSchemaAnalyzer._looks_like_timestamp(value_str):
                 patterns["has_timestamps"] = True
-            
+
             # Detect identifier patterns
             if DynamicSchemaAnalyzer._looks_like_identifier(value_str):
                 patterns["has_identifiers"] = True
-            
+
             # Detect metric patterns
             if DynamicSchemaAnalyzer._looks_like_metric(value_str):
                 patterns["has_metrics"] = True
-        
+
         return patterns
-    
+
     @staticmethod
     def _analyze_table_name_patterns(table_name: str) -> Dict[str, Any]:
         """Analyze table name for semantic patterns without hardcoded keywords."""
         name_lower = table_name.lower()
-        
+
         # Dynamic pattern recognition
         patterns = {
             "table_type": "general",
             "likely_temporal": False,
             "likely_transactional": False
         }
-        
+
         # Use pattern length and structure analysis instead of keywords
         if len(name_lower) > 10 and any(sep in name_lower for sep in ['_', '-']):
             patterns["table_type"] = "structured"
-        
+
         # Check for timestamp-like naming patterns
         if any(time_indicator in name_lower for time_indicator in ['time', 'date', 'log', 'event']):
             patterns["likely_temporal"] = True
-        
+
         # Check for transaction-like patterns
         if name_lower.endswith(('s', 'es', 'ies')):  # Plural forms often indicate collections
             patterns["likely_transactional"] = True
-        
+
         return patterns
-    
+
     @staticmethod
     def _looks_like_timestamp(value: str) -> bool:
         """Dynamic timestamp detection."""
@@ -641,7 +765,7 @@ class DynamicSchemaAnalyzer:
             r'^\d{10,13}$',        # Unix timestamp
         ]
         return any(re.search(pattern, value) for pattern in timestamp_patterns)
-    
+
     @staticmethod
     def _looks_like_identifier(value: str) -> bool:
         """Dynamic identifier detection."""
@@ -652,7 +776,7 @@ class DynamicSchemaAnalyzer:
             r'^[A-Z0-9]{8,}$',  # Uppercase alphanumeric ID
         ]
         return any(re.match(pattern, value, re.IGNORECASE) for pattern in id_patterns)
-    
+
     @staticmethod
     def _looks_like_metric(value: str) -> bool:
         """Dynamic metric detection."""
@@ -662,24 +786,82 @@ class DynamicSchemaAnalyzer:
         except ValueError:
             return False
 
+    @staticmethod
+    def analyze_table_characteristics(table_name: str, columns: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze table characteristics for optimization purposes.
+
+        Args:
+            table_name: Name of the table to analyze
+            columns: Dictionary of column information
+
+        Returns:
+            Dictionary containing table characteristics analysis
+        """
+        characteristics = {
+            "table_name": table_name,
+            "has_temporal_data": False,
+            "has_identifiers": False,
+            "has_metrics": False,
+            "column_count": len(columns),
+            "optimization_hints": []
+        }
+
+        if not columns:
+            return characteristics
+
+        # Analyze columns to determine table characteristics
+        for col_name, col_info in columns.items():
+            if not isinstance(col_info, dict):
+                continue
+
+            col_type = col_info.get("data_type", "").lower()
+
+            # Check for temporal columns
+            if any(t in col_type for t in ["datetime", "timestamp", "date"]):
+                characteristics["has_temporal_data"] = True
+
+            # Check for identifier columns
+            if "id" in col_name.lower() or "guid" in col_type or "uuid" in col_type:
+                characteristics["has_identifiers"] = True
+
+            # Check for metric columns
+            if any(t in col_type for t in ["int", "long", "real", "decimal", "float"]):
+                characteristics["has_metrics"] = True
+
+        # Generate optimization hints
+        if characteristics["has_temporal_data"]:
+            characteristics["optimization_hints"].append(
+                "Consider time-based filtering for better performance"
+            )
+        if characteristics["has_identifiers"]:
+            characteristics["optimization_hints"].append(
+                "Identifiers present - suitable for joins"
+            )
+        if characteristics["has_metrics"]:
+            characteristics["optimization_hints"].append(
+                "Numeric metrics available - consider aggregations"
+            )
+
+        return characteristics
+
 
 # Dynamic Column Analysis Configuration
 class DynamicColumnAnalyzer:
     """
     Replace static column patterns with dynamic analysis.
     """
-    
+
     @staticmethod
-    def generate_column_tags(column_name: str, data_type: str, sample_values: List[str] = None) -> List[str]:
+    def generate_column_tags(column_name: str, data_type: str, sample_values: Optional[List[str]] = None) -> List[str]:
         """
         Generate smart column tags based on data type and patterns, not static keywords.
         Replaces the static keyword-based approach in memory.py and utils.py.
         """
         tags = []
-        
+
         # Dynamic data type analysis
         type_lower = data_type.lower() if data_type else ""
-        
+
         # Type-based tags (primary categorization)
         if any(t in type_lower for t in ['datetime', 'timestamp', 'date', 'time']):
             tags.append("TEMPORAL")
@@ -695,34 +877,34 @@ class DynamicColumnAnalyzer:
             tags.append("STRUCTURED")
         elif any(t in type_lower for t in ['string', 'text', 'varchar', 'char']):
             tags.append("TEXT")
-        
+
         # Dynamic sample value analysis
         if sample_values:
             value_tags = DynamicColumnAnalyzer._analyze_sample_values(sample_values)
             tags.extend(value_tags)
-        
+
         # Dynamic column name analysis (pattern-based, not keyword matching)
         name_tags = DynamicColumnAnalyzer._analyze_column_name_patterns(column_name)
         tags.extend(name_tags)
-        
+
         return list(dict.fromkeys(tags))[:3]  # Remove duplicates and limit to 3 tags
-    
+
     @staticmethod
     def _analyze_sample_values(sample_values: List[str]) -> List[str]:
         """Analyze sample values to determine column characteristics."""
         tags = []
-        
+
         if not sample_values:
             return tags
-        
+
         # Check if all values are unique (likely identifier)
         if len(set(sample_values)) == len(sample_values):
             tags.append("UNIQUE_VALUES")
-        
+
         # Check if values are categorizable (limited set)
         if len(set(sample_values)) <= len(sample_values) * 0.5:
             tags.append("CATEGORICAL")
-        
+
         # Check for numerical patterns
         try:
             numeric_values = [float(str(v).replace(',', '')) for v in sample_values if v]
@@ -733,28 +915,28 @@ class DynamicColumnAnalyzer:
                     tags.append("MEASUREMENT_LIKE")
         except (ValueError, AttributeError):
             pass
-        
+
         return tags
-    
+
     @staticmethod
     def _analyze_column_name_patterns(column_name: str) -> List[str]:
         """Analyze column name patterns dynamically."""
         tags = []
         name_lower = column_name.lower()
-        
+
         # Dynamic pattern analysis
         if name_lower.endswith('id') or name_lower.endswith('_id'):
             tags.append("ID_COLUMN")
-        
+
         if 'time' in name_lower or 'date' in name_lower:
             tags.append("TIME_COLUMN")
-        
+
         if name_lower.startswith('is_') or name_lower.startswith('has_'):
             tags.append("BOOLEAN_FLAG")
-        
+
         if any(sep in name_lower for sep in ['_count', '_total', '_sum']):
             tags.append("AGGREGATION_COLUMN")
-        
+
         return tags
 
 
@@ -823,14 +1005,14 @@ RETRYABLE_ERROR_PATTERNS = [
     r"Connection aborted",
     r"Network is unreachable",
     r"Host is unreachable",
-    
+
     # gRPC specific errors
     r"grpc.*?unavailable",
     r"grpc.*?deadline_exceeded",
     r"grpc.*?resource_exhausted",
     r"subchannel.*?connection.*?failed",
     r"DNS resolution failed",
-    
+
     # Kusto/Azure specific transient errors
     r"ServiceNotAvailable",
     r"InternalServerError",
@@ -838,7 +1020,7 @@ RETRYABLE_ERROR_PATTERNS = [
     r"ThrottlingError",
     r"TemporaryFailure",
     r"ClusterNotFound.*?temporarily",
-    
+
     # Authentication token refresh errors
     r"TokenExpired",
     r"AuthenticationFailed.*?retry",

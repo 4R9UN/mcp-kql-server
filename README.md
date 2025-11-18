@@ -1,11 +1,13 @@
 # MCP KQL Server
+
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/4r9un-mcp-kql-server-badge.png)](https://mseep.ai/app/4r9un-mcp-kql-server)
 
-> **AI-Powered KQL Query Execution with Intelligent Schema Memory**
+> **AI-Powered KQL Query Execution with Natural Language to KQL (NL2KQL) Conversion and Execution **
 
-A Model Context Protocol (MCP) server that provides intelligent KQL (Kusto Query Language) query execution with AI-powered schema caching and context assistance for Azure Data Explorer clusters.
+A Model Context Protocol (MCP) server that transforms natural language questions into optimized KQL queries with intelligent schema discovery, AI-powered caching, and seamless Azure Data Explorer integration. Simply ask questions in plain English and get instant, accurate KQL queries with context-aware results.
 
 <!-- Badges Section -->
+
 [![Verified on MseeP](https://mseep.ai/badge.svg)](https://mseep.ai/app/18772353-3d90-4b12-a253-cf752efaadd2)
 [![PyPI version](https://img.shields.io/pypi/v/mcp-kql-server.svg)](https://pypi.org/project/mcp-kql-server/)
 [![Python](https://img.shields.io/pypi/pyversions/mcp-kql-server.svg)](https://pypi.org/project/mcp-kql-server/)
@@ -378,5 +380,6 @@ We welcome contributions! Please do.
 [![Star History Chart](https://api.star-history.com/svg?repos=4R9UN/mcp-kql-server&type=Date)](https://star-history.com/#4R9UN/mcp-kql-server&Date)
 
 ---
+mcp-name: io.github.4R9UN/mcp-kql-server
 
 **Happy Querying! 🎉**

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.4R9UN/mcp-kql-server",
+  "title": "MCP KQL Server",
+  "description": "Transform natural language into KQL queries with AI-powered schema discovery and query execution",
+  "status": "active",
+  "tags": [
+    "kql",
+    "kusto",
+    "azure",
+    "data-explorer",
+    "nl2kql",
+    "natural-language",
+    "query-execution",
+    "schema-discovery",
+    "ai-powered",
+    "data-analytics"
+  ],
+  "repository": {
+    "url": "https://github.com/4R9UN/mcp-kql-server",
+    "source": "github"
+  },
+  "version": "2.0.8",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mcp-kql-server",
+      "version": "2.0.8",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

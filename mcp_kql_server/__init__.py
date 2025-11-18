@@ -43,9 +43,11 @@ def _setup_memory_directories():
         # Initialize unified corpus (creates knowledge_corpus.json if missing)
         mm = get_memory_manager()
         mm.save_corpus()
-        logger.info(f"Unified memory initialized at: {mm.corpus_path}")
-    except Exception as e:
-        logger.debug(f"Unified memory setup skipped: {e}")
+        # Use canonical attribute name `memory_path` directly; avoid deprecated alias `corpus_path`
+        logger.info("Unified memory initialized at: %s", mm.memory_path)
+    except (OSError, RuntimeError, ImportError) as e:
+        # Narrow exception types to avoid masking unexpected failures
+        logger.debug("Unified memory setup skipped: %s", e)
 
 
 def _suppress_azure_logs():
@@ -65,30 +67,36 @@ def _suppress_azure_logs():
         for logger_name in azure_loggers:
             logging.getLogger(logger_name).setLevel(logging.WARNING)
 
-    except Exception:
-        pass  # Ignore if loggers don't exist yet
+    except (OSError, RuntimeError):
+        # Ignore if loggers don't exist yet or environment variable issues
+        pass
 
 
 def _suppress_fastmcp_branding():
     """Suppress FastMCP branding and verbose output."""
     try:
-        # Set environment variables to suppress FastMCP branding
-        os.environ["FASTMCP_QUIET"] = "true"
-        os.environ["FASTMCP_NO_BANNER"] = "true"
-        os.environ["FASTMCP_SUPPRESS_BRANDING"] = "true"
-        os.environ["FASTMCP_NO_LOGO"] = "true"
-        os.environ["FASTMCP_SILENT"] = "true"
-        os.environ["NO_COLOR"] = "true"
+        # Set environment variables to suppress FastMCP branding (both string and numeric values)
+        os.environ["FASTMCP_QUIET"] = "1"
+        os.environ["FASTMCP_NO_BANNER"] = "1"
+        os.environ["FASTMCP_SUPPRESS_BRANDING"] = "1"
+        os.environ["FASTMCP_NO_LOGO"] = "1"
+        os.environ["FASTMCP_SILENT"] = "1"
+        os.environ["NO_COLOR"] = "1"
         os.environ["PYTHONIOENCODING"] = "utf-8"
 
+        # Additional suppression flags
+        os.environ["FASTMCP_DISABLE_BANNER"] = "1"
+        os.environ["MCP_QUIET"] = "1"
+
         # Suppress FastMCP and related loggers
-        fastmcp_loggers = ["fastmcp", "rich", "rich.console", "rich.progress"]
+        fastmcp_loggers = ["fastmcp", "rich", "rich.console", "rich.progress", "fastmcp.server", "fastmcp.cli"]
 
         for logger_name in fastmcp_loggers:
-            logging.getLogger(logger_name).setLevel(logging.ERROR)
+            logging.getLogger(logger_name).setLevel(logging.CRITICAL)
 
-    except Exception:
-        pass  # Ignore if loggers don't exist yet
+    except (OSError, RuntimeError):
+        # Ignore if loggers don't exist yet
+        pass
 
 
 # Perform automatic setup on import

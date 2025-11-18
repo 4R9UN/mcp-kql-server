@@ -339,3 +339,7 @@ $RECYCLE.BIN/
 .Trash-*
 .nfs*
 RELEASE_NOTES_v2.0.3.md
+mcp-publisher.exe
+.mcpregistry_github_token
+.mcpregistry_registry_token
+.gitignore

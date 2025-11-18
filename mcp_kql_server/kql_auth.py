@@ -24,13 +24,13 @@ logger = logging.getLogger(__name__)
 def kql_auth():
     """
     Check if user is authenticated with Azure CLI.
-    
+
     Returns:
         dict: Authentication status and message
     """
     logger.info("Checking Azure CLI authentication...")
     az_command = "az.cmd" if platform.system() == "Windows" else "az"
-    
+
     try:
         env = os.environ.copy()
         subprocess.run(
@@ -54,7 +54,7 @@ def kql_auth():
 def trigger_az_cli_auth():
     """
     Trigger Azure CLI authentication using device code.
-    
+
     Returns:
         dict: Authentication status and message
     """
@@ -87,33 +87,33 @@ def trigger_az_cli_auth():
 def authenticate():
     """
     Complete authentication flow with caching and retry logic.
-    
+
     Returns:
         dict: Final authentication status and message
     """
     logger.info("Starting authentication process...")
-    
+
     auth_status = kql_auth()
     if auth_status["authenticated"]:
         logger.info("Already authenticated to Azure.")
         return auth_status
-    
+
     logger.info("Not authenticated. Initiating Azure login...")
     auth_status = trigger_az_cli_auth()
-    
+
     if not auth_status["authenticated"]:
         logger.error("Authentication failed: %s", auth_status["message"])
         logger.info("Troubleshooting tips:")
         logger.info("1. Ensure you have a working internet connection")
         logger.info("2. Verify your Azure account is active")
         logger.info("3. Try running 'az login' directly in your terminal")
-    
+
     return auth_status
 
 def authenticate_kusto() -> Dict[str, Any]:
     """
     Wrapper function for compatibility with existing code.
-    
+
     Returns:
         dict: Authentication status and message
     """

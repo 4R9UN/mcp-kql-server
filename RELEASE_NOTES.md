@@ -2,6 +2,45 @@
 
 ---
 
+## 📦 **v2.0.8 - GitHub MCP Registry Ready**
+
+> **Registry Optimization & Documentation Update** 🚀
+
+**Release Date**: November 18, 2025
+**Author**: Arjun Trivedi
+**Email**: arjuntrivedi42@yahoo.com
+**Repository**: https://github.com/4R9UN/mcp-kql-server
+
+### 🚀 **What's New in v2.0.8**
+
+This release prepares the MCP KQL Server for GitHub MCP Registry publication with enhanced metadata and improved documentation.
+
+#### **1. GitHub MCP Registry Compliance**
+- **📋 Updated Schema**: Migrated to latest MCP schema (2025-09-29)
+- **🏷️ Added Tags**: 10 discovery tags (kql, kusto, azure, nl2kql, natural-language, etc.)
+- **✨ Enhanced Metadata**: Added title field and improved description
+- **📝 PyPI Verification**: Added `mcp-name` identifier to README for ownership proof
+
+#### **2. Documentation Improvements**
+- **🎯 NL2KQL Emphasis**: Highlighted Natural Language to KQL conversion throughout
+- **🔖 Badge Optimization**: Updated badges for better reliability and visibility
+- **📊 Better Discovery**: Improved descriptions to emphasize AI-powered query execution
+
+#### **3. Configuration Updates**
+- **⚙️ server.json**: Updated to GitHub MCP Registry standards with proper field naming (camelCase)
+- **📚 README.md**: Enhanced with registry-compliant metadata and improved badge layout
+- **🔧 pyproject.toml**: Updated description to highlight NL2KQL functionality
+
+### 🎯 **Key Features**
+
+- Natural Language to KQL (NL2KQL) query conversion
+- Intelligent schema discovery and caching
+- AI-powered context assistance
+- Seamless Azure Data Explorer integration
+- Execute KQL queries directly in AI prompts
+
+---
+
 ## 🐛 **v2.0.7 - Bug Fix Release: Sample Values & Query Timeout**
 
 > **Bug Fix Release** 🛠️

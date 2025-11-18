@@ -8,11 +8,19 @@ Email: arjuntrivedi42@yahoo.com
 
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Dict, Optional, List, Any
 
 import pandas as pd
+
+# Suppress FastMCP banner before import
+os.environ["FASTMCP_QUIET"] = "1"
+os.environ["FASTMCP_NO_BANNER"] = "1"
+os.environ["FASTMCP_SUPPRESS_BRANDING"] = "1"
+os.environ["NO_COLOR"] = "1"
+
 from fastmcp import FastMCP
 
 from .constants import (
@@ -20,7 +28,10 @@ from .constants import (
 )
 from .execute_kql import kql_execute_tool
 from .memory import get_memory_manager
-from .utils import bracket_if_needed, SchemaManager, ErrorHandler, QueryProcessor
+from .utils import (
+    bracket_if_needed, SchemaManager, ErrorHandler,
+    QueryProcessor, get_validation_info
+)
 from .kql_auth import authenticate_kusto
 
 logger = logging.getLogger(__name__)
@@ -64,7 +75,6 @@ async def execute_kql_query(
         JSON string with query results or generated query.
     """
     try:
-        global kusto_manager_global
         if not kusto_manager_global or not kusto_manager_global.get("authenticated"):
             return json.dumps({
                 "success": False,
@@ -76,55 +86,87 @@ async def execute_kql_query(
                 ]
             })
 
+        # Track requested vs active authentication method to satisfy lint and provide transparency
+        requested_auth_method = auth_method or "device"
+        active_auth_method = None
+        if isinstance(kusto_manager_global, dict):
+            active_auth_method = kusto_manager_global.get("auth_method") or kusto_manager_global.get("method")
+        if active_auth_method and requested_auth_method != active_auth_method:
+            logger.debug(
+                "Auth method override requested=%s active=%s "
+                "(override ignored; startup auth in effect)",
+                requested_auth_method, active_auth_method
+            )
+
         # Generate KQL query if requested
         if generate_query:
-            generated_result = await ErrorHandler.safe_execute(
-                lambda: _generate_kql_from_natural_language(
+            # Directly await the async generation function instead of using safe_execute (which is sync)
+            try:
+                generated_result = await _generate_kql_from_natural_language(
                     query, cluster_url, database, table_name, use_live_schema
-                ),
-                default={
+                )
+            except (ValueError, RuntimeError, KeyError) as gen_err:
+                logger.warning("Query generation failed: %s", gen_err)
+                generated_result = {
                     "success": False,
                     "error": "Query generation failed",
-                    "suggestions": ["Try providing a more specific query description", "Specify the table name explicitly"]
-                },
-                error_msg="Query generation failed"
-            )
-            
+                    "suggestions": [
+                        "Try providing a more specific query description",
+                        "Specify the table name explicitly"
+                    ],
+                    "query": ""
+                }
+
             if not generated_result["success"]:
                 return ErrorHandler.safe_json_dumps(generated_result, indent=2)
-            
+
             # Use the generated query for execution
             query = generated_result["query"]
-            
+
             # Return generation info if output format is specifically for generation
             if output_format == "generation_only":
                 return ErrorHandler.safe_json_dumps(generated_result, indent=2)
 
-        # Execute query
-        df = kql_execute_tool(kql_query=query, cluster_uri=cluster_url, database=database)
-
-        if df is None or df.empty:
-            logger.warning(f"Query returned empty result for: {query[:100]}...")
+        # Execute query with proper exception handling
+        try:
+            df = kql_execute_tool(kql_query=query, cluster_uri=cluster_url, database=database)
+        except Exception as exec_error:
+            logger.error("Query execution error: %s", exec_error)
             result = {
                 "success": False,
-                "error": "Query returned no results",
+                "error": str(exec_error),
+                "query": query[:200] + "..." if len(query) > 200 else query,
+                "suggestions": [
+                    "Check your query syntax",
+                    "Verify cluster and database are correct",
+                    "Ensure table names exist in the database"
+                ],
+                "requested_auth_method": requested_auth_method,
+                "active_auth_method": active_auth_method
+            }
+            return json.dumps(result, indent=2)
+
+        if df is None or df.empty:
+            logger.info("Query returned empty result (no rows) for: %s...", query[:100])
+            result = {
+                "success": True,
+                "error": None,
+                "message": "Query executed successfully but returned no rows",
                 "row_count": 0,
-                "suggestions": ["Check your query syntax and logic", "Verify table names and filters"]
+                "columns": df.columns.tolist() if df is not None else [],
+                "data": [],
+                "suggestions": [
+                    "Your query syntax is valid but returned no data",
+                    "Check your where clause filters",
+                    "Verify the time range in your query"
+                ],
+                "requested_auth_method": requested_auth_method,
+                "active_auth_method": active_auth_method
             }
             return json.dumps(result, indent=2)
 
         # Check if validation info was attached during execution
-        validation_info = {}
-        if hasattr(df, '_validation_result'):
-            validation_info = {
-                "warnings": getattr(df._validation_result, 'warnings', []),
-                "suggestions": getattr(df._validation_result, 'suggestions', []),
-                "tables_used": list(getattr(df._validation_result, 'tables_used', set())),
-                "columns_used": {
-                    table: list(cols)
-                    for table, cols in getattr(df._validation_result, 'columns_used', {}).items()
-                }
-            }
+        validation_info = get_validation_info(df)
 
         # Return results
         if output_format == "csv":
@@ -155,25 +197,27 @@ async def execute_kql_query(
                                 record[col] = value
                         records.append(record)
                     return records
-                except Exception as e:
-                    logger.warning(f"DataFrame conversion failed: {e}")
+                except (ValueError, TypeError, AttributeError) as e:
+                    logger.warning("DataFrame conversion failed: %s", e)
                     # Fallback: convert to string representation
                     return df.astype(str).to_dict("records")
-            
+
             result = {
                 "success": True,
                 "row_count": len(df),
                 "columns": df.columns.tolist(),
                 "data": convert_dataframe_to_serializable(df),
+                "requested_auth_method": requested_auth_method,
+                "active_auth_method": active_auth_method
             }
-            
+
             # Add validation info if available
             if validation_info and any(validation_info.values()):
                 result["validation"] = validation_info
-            
+
             return ErrorHandler.safe_json_dumps(result, indent=2)
 
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, KeyError) as e:
         # Use the enhanced ErrorHandler for consistent Kusto error handling
         error_result = ErrorHandler.handle_kusto_error(e)
         return ErrorHandler.safe_json_dumps(error_result, indent=2)
@@ -183,24 +227,26 @@ async def _generate_kql_from_natural_language(
     cluster_url: str,
     database: str,
     table_name: Optional[str] = None,
-    use_live_schema: bool = True
+    _use_live_schema: bool = True
 ) -> Dict[str, Any]:
     """
     Enhanced KQL generation with pre-validation of columns to ensure accuracy.
+    Note: _use_live_schema is reserved for future use.
     """
     try:
         # 1. Determine target table
         entities = query_processor.parse(natural_language_query)
-        target_table = table_name or (entities.get("tables")[0] if entities.get("tables") else None)
+        parsed_tables = entities.get("tables") or []
+        target_table = table_name or (parsed_tables[0] if parsed_tables else None)
 
         if not target_table:
             return {"success": False, "error": "Could not determine a target table from the query.", "query": ""}
 
         # 2. Get the actual schema for the table
-        schema_info = await schema_manager.get_table_schema(cluster_url, database, target_table, force_refresh=use_live_schema)
+        schema_info = await schema_manager.get_table_schema(cluster_url, database, target_table)
         if not schema_info or not schema_info.get("columns"):
             return {"success": False, "error": f"Failed to retrieve a valid schema for table '{target_table}'.", "query": ""}
-        
+
         actual_columns = schema_info["columns"].keys()
         # Create a case-insensitive map for matching
         actual_columns_lower = {col.lower(): col for col in actual_columns}
@@ -235,24 +281,24 @@ async def _generate_kql_from_natural_language(
             "columns_used": valid_columns
         }
 
-    except Exception as e:
-        logger.error(f"Error in enhanced KQL generation: {e}", exc_info=True)
+    except (ValueError, KeyError, RuntimeError) as e:
+        logger.error("Error in enhanced KQL generation: %s", e, exc_info=True)
         return {"success": False, "error": str(e), "query": ""}
 
 
 @mcp.tool()
 async def schema_memory(
     operation: str,
-    cluster_url: str = None,
-    database: str = None,
-    table_name: str = None,
-    natural_language_query: str = None,
+    cluster_url: Optional[str] = None,
+    database: Optional[str] = None,
+    table_name: Optional[str] = None,
+    natural_language_query: Optional[str] = None,
     session_id: str = "default",
     include_visualizations: bool = True
 ) -> str:
     """
     Comprehensive schema memory and analysis operations.
-    
+
     Operations:
     - "discover": Discover and cache schema for a table
     - "list_tables": List all tables in a database
@@ -261,7 +307,7 @@ async def schema_memory(
     - "clear_cache": Clear schema cache
     - "get_stats": Get memory statistics
     - "refresh_schema": Proactively refresh schema for a database
-    
+
     Args:
         operation: The operation to perform
         cluster_url: Kusto cluster URL (required for most operations)
@@ -270,12 +316,11 @@ async def schema_memory(
         natural_language_query: Natural language query for context operations
         session_id: Session ID for report generation
         include_visualizations: Include visualizations in reports
-    
+
     Returns:
         JSON string with operation results
     """
     try:
-        global kusto_manager_global
         if not kusto_manager_global or not kusto_manager_global.get("authenticated"):
             return json.dumps({
                 "success": False,
@@ -288,10 +333,26 @@ async def schema_memory(
             })
 
         if operation == "discover":
+            # Validate required parameters
+            if not cluster_url or not database or not table_name:
+                return json.dumps({
+                    "success": False,
+                    "error": "cluster_url, database, and table_name are required for discover operation"
+                })
             return await _schema_discover_operation(cluster_url, database, table_name)
         elif operation == "list_tables":
+            if not cluster_url or not database:
+                return json.dumps({
+                    "success": False,
+                    "error": "cluster_url and database are required for list_tables operation"
+                })
             return await _schema_list_tables_operation(cluster_url, database)
         elif operation == "get_context":
+            if not cluster_url or not database or not natural_language_query:
+                return json.dumps({
+                    "success": False,
+                    "error": "cluster_url, database, and natural_language_query are required for get_context operation"
+                })
             return await _schema_get_context_operation(cluster_url, database, natural_language_query)
         elif operation == "generate_report":
             return await _schema_generate_report_operation(session_id, include_visualizations)
@@ -300,6 +361,11 @@ async def schema_memory(
         elif operation == "get_stats":
             return await _schema_get_stats_operation()
         elif operation == "refresh_schema":
+            if not cluster_url or not database:
+                return json.dumps({
+                    "success": False,
+                    "error": "cluster_url and database are required for refresh_schema operation"
+                })
             return await _schema_refresh_operation(cluster_url, database)
         else:
             return json.dumps({
@@ -308,15 +374,15 @@ async def schema_memory(
                 "available_operations": ["discover", "list_tables", "get_context", "generate_report", "clear_cache", "get_stats", "refresh_schema"]
             })
 
-    except Exception as e:
-        logger.error(f"Schema memory operation failed: {e}")
+    except (ValueError, KeyError, RuntimeError) as e:
+        logger.error("Schema memory operation failed: %s", e)
         return json.dumps({
             "success": False,
             "error": str(e)
         })
 
 
-def _get_session_queries(session_id: str, memory) -> List[Dict]:
+def _get_session_queries(_session_id: str, memory) -> List[Dict]:
     """Get queries for a session (simplified implementation)."""
     # For now, get recent queries from all clusters
     try:
@@ -325,7 +391,7 @@ def _get_session_queries(session_id: str, memory) -> List[Dict]:
             learning_results = cluster_data.get("learning_results", [])
             all_queries.extend(learning_results[-10:])  # Last 10 results
         return all_queries
-    except Exception:
+    except (ValueError, RuntimeError, AttributeError):
         return []
 
 
@@ -333,11 +399,11 @@ def _generate_executive_summary(session_queries: List[Dict]) -> str:
     """Generate executive summary of the analysis session."""
     if not session_queries:
         return "No queries executed in this session."
-    
+
     total_queries = len(session_queries)
     successful_queries = sum(1 for q in session_queries if q.get("result_metadata", {}).get("success", True))
     total_rows = sum(q.get("result_metadata", {}).get("row_count", 0) for q in session_queries)
-    
+
     return f"""
 ## Executive Summary
 
@@ -353,12 +419,12 @@ def _perform_data_analysis(session_queries: List[Dict]) -> str:
     """Perform analysis of query patterns and results."""
     if not session_queries:
         return "No data available for analysis."
-    
+
     # Analyze query complexity
     complex_queries = sum(1 for q in session_queries if q.get("learning_insights", {}).get("query_complexity", 0) > 3)
     temporal_queries = sum(1 for q in session_queries if q.get("learning_insights", {}).get("has_time_reference", False))
     aggregation_queries = sum(1 for q in session_queries if q.get("learning_insights", {}).get("has_aggregation", False))
-    
+
     return f"""
 ## Data Analysis
 
@@ -373,7 +439,7 @@ def _perform_data_analysis(session_queries: List[Dict]) -> str:
 """
 
 
-def _generate_data_flow_diagram(session_queries: List[Dict]) -> str:
+def _generate_data_flow_diagram(_session_queries: List[Dict]) -> str:
     """Generate Mermaid data flow diagram."""
     return """
 ### Data Flow Architecture
@@ -387,11 +453,11 @@ graph TD
     E --> F[Result Processing]
     F --> G[Learning & Context Update]
     G --> H[Response Generation]
-    
+
     C --> I[Memory Manager]
     I --> J[Schema Cache]
     G --> I
-    
+
     style A fill:#e1f5fe
     style E fill:#f3e5f5
     style I fill:#e8f5e8
@@ -399,7 +465,7 @@ graph TD
 """
 
 
-def _generate_schema_relationship_diagram(session_queries: List[Dict]) -> str:
+def _generate_schema_relationship_diagram(_session_queries: List[Dict]) -> str:
     """Generate Mermaid schema relationship diagram."""
     return """
 ### Schema Relationship Model
@@ -411,27 +477,27 @@ erDiagram
         string description
         datetime last_accessed
     }
-    
+
     DATABASE {
         string database_name
         int table_count
         datetime discovered_at
     }
-    
+
     TABLE {
         string table_name
         int column_count
         string schema_type
         datetime last_updated
     }
-    
+
     COLUMN {
         string column_name
         string data_type
         string description
         list sample_values
     }
-    
+
     CLUSTER ||--o{ DATABASE : contains
     DATABASE ||--o{ TABLE : contains
     TABLE ||--o{ COLUMN : has
@@ -439,7 +505,7 @@ erDiagram
 """
 
 
-def _generate_timeline_diagram(session_queries: List[Dict]) -> str:
+def _generate_timeline_diagram(_session_queries: List[Dict]) -> str:
     """Generate Mermaid timeline diagram."""
     return """
 ### Query Execution Timeline
@@ -447,16 +513,16 @@ def _generate_timeline_diagram(session_queries: List[Dict]) -> str:
 ```mermaid
 timeline
     title Query Execution Timeline
-    
+
     section Discovery Phase
         Schema Discovery    : Auto-triggered on query execution
         Table Analysis      : Column types and patterns identified
-        
+
     section Execution Phase
         Query Validation    : Syntax and schema validation
         Kusto Execution     : Query sent to cluster
         Result Processing   : Data transformation and formatting
-        
+
     section Learning Phase
         Pattern Recognition : Query patterns stored
         Context Building    : Schema context enhanced
@@ -468,28 +534,28 @@ timeline
 def _generate_recommendations(session_queries: List[Dict]) -> List[str]:
     """Generate actionable recommendations based on query analysis."""
     recommendations = []
-    
+
     if not session_queries:
         recommendations.append("Start executing queries to get personalized recommendations")
         return recommendations
-    
+
     # Analyze query patterns to generate recommendations
     has_complex_queries = any(q.get("learning_insights", {}).get("query_complexity", 0) > 5 for q in session_queries)
     has_failed_queries = any(not q.get("result_metadata", {}).get("success", True) for q in session_queries)
     low_data_queries = sum(1 for q in session_queries if q.get("result_metadata", {}).get("row_count", 0) < 10)
-    
+
     if has_complex_queries:
         recommendations.append("Consider breaking down complex queries into simpler steps for better performance")
-    
+
     if has_failed_queries:
         recommendations.append("Review failed queries and use schema discovery to ensure correct column names")
-    
+
     if low_data_queries > len(session_queries) * 0.5:
         recommendations.append("Many queries returned small datasets - consider adjusting filters or time ranges")
-    
+
     recommendations.append("Use execute_kql_query with generate_query=True for assistance with query construction")
     recommendations.append("Leverage schema discovery to explore available tables and columns")
-    
+
     return recommendations
 
 
@@ -511,10 +577,10 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ## Recommendations
 
 """
-    
+
     for i, rec in enumerate(report['recommendations'], 1):
         markdown += f"{i}. {rec}\n"
-    
+
     markdown += """
 ## Next Steps
 
@@ -526,15 +592,15 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ---
 *Report generated by MCP KQL Server with AI-enhanced analytics*
 """
-    
+
     return markdown
 
 
 async def _schema_discover_operation(cluster_url: str, database: str, table_name: str) -> str:
     """Discover and cache schema for a table."""
     try:
-        schema_info = await schema_manager.get_table_schema(cluster_url, database, table_name, force_refresh=True)
-        
+        schema_info = await schema_manager.get_table_schema(cluster_url, database, table_name)
+
         if schema_info and not schema_info.get("error"):
             return json.dumps({
                 "success": True,
@@ -546,41 +612,51 @@ async def _schema_discover_operation(cluster_url: str, database: str, table_name
                 "success": False,
                 "error": f"Failed to discover schema for {table_name}: {schema_info.get('error', 'Unknown error')}"
             })
-    except Exception as e:
+    except (ValueError, RuntimeError, OSError) as e:
         return json.dumps({
             "success": False,
             "error": str(e)
         })
 
 async def _schema_list_tables_operation(cluster_url: str, database: str) -> str:
-    """List all tables in a database."""
+    """List all tables in a database using SchemaDiscovery."""
     try:
-        from .utils import discover_tables_in_database
-        tables = await discover_tables_in_database(cluster_url, database)
+        from .utils import SchemaDiscovery
+        discovery = SchemaDiscovery(memory_manager)
+        tables = await discovery.list_tables_in_db(cluster_url, database)
         return json.dumps({
             "success": True,
             "tables": tables,
             "count": len(tables)
         }, indent=2)
-    except Exception as e:
+    except (ValueError, RuntimeError, OSError) as e:
         return json.dumps({
             "success": False,
             "error": str(e)
         })
 
 async def _schema_get_context_operation(cluster_url: str, database: str, natural_language_query: str) -> str:
-    """Get AI context for tables."""
+    """Get AI context for tables based on natural language query parsing."""
     try:
-        context = memory_manager.get_ai_context_for_tables(
-            cluster_url=cluster_url,
-            database=database,
-            natural_language_query=natural_language_query
-        )
+        if not natural_language_query:
+            return json.dumps({
+                "success": False,
+                "error": "natural_language_query is required for get_context operation"
+            })
+        entities = query_processor.parse(natural_language_query)
+        tables = entities.get("tables") or []
+        if not tables:
+            return json.dumps({
+                "success": False,
+                "error": "No table names could be extracted from the natural language query"
+            })
+        context = memory_manager.get_ai_context_for_tables(cluster_url, database, tables)
         return json.dumps({
             "success": True,
+            "tables": tables,
             "context": context
         }, indent=2)
-    except Exception as e:
+    except (ValueError, RuntimeError, AttributeError) as e:
         return json.dumps({
             "success": False,
             "error": str(e)
@@ -591,46 +667,48 @@ async def _schema_generate_report_operation(session_id: str, include_visualizati
     try:
         # Gather session data
         session_queries = _get_session_queries(session_id, memory_manager)
-        
+
         report = {
             "summary": _generate_executive_summary(session_queries),
             "analysis": _perform_data_analysis(session_queries),
             "visualizations": [],
             "recommendations": []
         }
-        
+
         if include_visualizations:
             report["visualizations"] = [
                 _generate_data_flow_diagram(session_queries),
                 _generate_schema_relationship_diagram(session_queries),
                 _generate_timeline_diagram(session_queries)
             ]
-        
+
         report["recommendations"] = _generate_recommendations(session_queries)
         markdown_report = _format_report_markdown(report)
-        
+
         return json.dumps({
             "success": True,
             "report": markdown_report,
             "session_id": session_id,
             "generated_at": datetime.now().isoformat()
         }, indent=2)
-        
-    except Exception as e:
+
+    except (ValueError, RuntimeError, OSError) as e:
         return json.dumps({
             "success": False,
             "error": str(e)
         })
 
 async def _schema_clear_cache_operation() -> str:
-    """Clear schema cache."""
+    """Clear schema cache (LRU for get_schema)."""
     try:
-        memory_manager.clear_schema_cache()
+        # Clear the LRU cache on get_schema
+        if hasattr(memory_manager.get_schema, "cache_clear"):
+            memory_manager.get_schema.cache_clear()
         return json.dumps({
             "success": True,
             "message": "Schema cache cleared successfully"
         })
-    except Exception as e:
+    except (ValueError, RuntimeError, AttributeError) as e:
         return json.dumps({
             "success": False,
             "error": str(e)
@@ -644,7 +722,7 @@ async def _schema_get_stats_operation() -> str:
             "success": True,
             "stats": stats
         }, indent=2)
-    except Exception as e:
+    except (ValueError, RuntimeError, AttributeError) as e:
         return json.dumps({
             "success": False,
             "error": str(e)
@@ -658,67 +736,65 @@ async def _schema_refresh_operation(cluster_url: str, database: str) -> str:
                 "success": False,
                 "error": "cluster_url and database are required for refresh_schema operation"
             })
-        
-        # Step 1: List all tables in the database
-        from .utils import discover_tables_in_database
-        tables = await discover_tables_in_database(cluster_url, database)
-        
+
+        # Step 1: List all tables using SchemaDiscovery
+        from .utils import SchemaDiscovery
+        discovery = SchemaDiscovery(memory_manager)
+        tables = await discovery.list_tables_in_db(cluster_url, database)
+
         if not tables:
             return json.dumps({
                 "success": False,
                 "error": f"No tables found in database {database}"
             })
-        
+
         # Step 2: Refresh schema for each table
         refreshed_tables = []
         failed_tables = []
-        
         for table_name in tables:
             try:
-                logger.info(f"Refreshing schema for {database}.{table_name}")
-                schema_info = await schema_manager.get_table_schema(
-                    cluster_url, database, table_name, force_refresh=True
-                )
-                
+                logger.info("Refreshing schema for %s.%s", database, table_name)
+                schema_info = await schema_manager.get_table_schema(cluster_url, database, table_name)
                 if schema_info and not schema_info.get("error"):
                     refreshed_tables.append({
                         "table": table_name,
                         "columns": len(schema_info.get("columns", {})),
                         "last_updated": schema_info.get("last_updated", "unknown")
                     })
-                    logger.debug(f"Successfully refreshed schema for {table_name}")
+                    logger.debug("Successfully refreshed schema for %s", table_name)
                 else:
                     failed_tables.append({
                         "table": table_name,
                         "error": schema_info.get("error", "Unknown error")
                     })
-                    logger.warning(f"Failed to refresh schema for {table_name}: {schema_info.get('error')}")
-                    
-            except Exception as table_error:
+                    logger.warning("Failed to refresh schema for %s: %s", table_name, schema_info.get('error'))
+            except (ValueError, RuntimeError, OSError) as table_error:
                 failed_tables.append({
                     "table": table_name,
                     "error": str(table_error)
                 })
-                logger.error(f"Exception refreshing schema for {table_name}: {table_error}")
-        
-        # Step 3: Update memory with discovery timestamp
+                logger.error(
+                    "Exception refreshing schema for %s: %s",
+                    table_name, table_error
+                )
+
+        # Step 3: Update memory corpus metadata
         try:
-            from .utils import normalize_name
-            cluster_key = normalize_name(cluster_url)
-            
-            # Update the discovery metadata
-            if cluster_key in memory_manager.memories:
-                if database in memory_manager.memories[cluster_key].get("databases", {}):
-                    memory_manager.memories[cluster_key]["databases"][database]["last_schema_refresh"] = datetime.now().isoformat()
-                    memory_manager.memories[cluster_key]["databases"][database]["total_tables"] = len(refreshed_tables)
-            
-            # Save the updated memory
-            memory_manager.save_memory()
-            logger.info(f"Updated memory with refresh metadata for {database}")
-            
-        except Exception as memory_error:
-            logger.warning(f"Failed to update memory metadata: {memory_error}")
-        
+            cluster_key = memory_manager.normalize_cluster_uri(cluster_url)
+            clusters = memory_manager.corpus.get("clusters", {})
+            if cluster_key in clusters:
+                db_entry = clusters[cluster_key].get("databases", {}).get(database, {})
+                if db_entry:
+                    # Ensure meta section exists
+                    if "meta" not in db_entry:
+                        db_entry["meta"] = {}
+                    db_entry["meta"]["last_schema_refresh"] = datetime.now().isoformat()
+                    db_entry["meta"]["total_tables"] = len(refreshed_tables)
+            memory_manager.save_corpus()
+            logger.info("Updated memory corpus with refresh metadata for %s", database)
+        except (ValueError, KeyError, AttributeError) as memory_error:
+            logger.warning("Failed to update memory metadata: %s", memory_error)
+
         # Step 4: Return comprehensive results
         return json.dumps({
             "success": True,
@@ -732,9 +808,8 @@ async def _schema_refresh_operation(cluster_url: str, database: str) -> str:
             "refreshed_tables": refreshed_tables,
             "failed_tables": failed_tables if failed_tables else None
         }, indent=2)
-        
-    except Exception as e:
-        logger.error(f"Schema refresh operation failed: {e}")
+    except (ValueError, RuntimeError, OSError) as e:
+        logger.error("Schema refresh operation failed: %s", e)
         return json.dumps({
             "success": False,
             "error": f"Schema refresh failed: {str(e)}"
@@ -745,23 +820,23 @@ def main():
     """Start the simplified MCP KQL server."""
     global kusto_manager_global
     logger.info("Starting simplified MCP KQL server...")
-    
+
     try:
         # Single authentication at startup
         kusto_manager_global = authenticate_kusto()
-        
+
         if kusto_manager_global["authenticated"]:
-            logger.info("🚀 MCP KQL Server ready - authenticated and initialized")
+            logger.info("ðŸš€ MCP KQL Server ready - authenticated and initialized")
         else:
-            logger.warning("🚀 MCP KQL Server starting - authentication failed, some operations may not work")
-        
+            logger.warning("ðŸš€ MCP KQL Server starting - authentication failed, some operations may not work")
+
         # Log available tools
         logger.info("Available tools: execute_kql_query (with query generation), schema_memory (comprehensive schema operations)")
-        
+
         # Use FastMCP's built-in stdio transport
         mcp.run()
-    except Exception as e:
-        logger.error(f"Failed to start server: {e}")
+    except (RuntimeError, OSError, ImportError) as e:
+        logger.error("Failed to start server: %s", e)
 
 if __name__ == "__main__":
     main()

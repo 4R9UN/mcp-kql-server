@@ -83,7 +83,7 @@ def example_json_processing() -> Dict[str, Any]:
                 | extend SessionId = tostring(EventProps.sessionId)
                 | extend ActionType = tostring(EventProps.actionType)
                 | where isnotempty(UserId)
-                | summarize 
+                | summarize
                     UniqueActions = dcount(ActionType),
                     TotalEvents = count(),
                     LastActivity = max(Timestamp)
@@ -124,7 +124,7 @@ def example_security_analysis() -> Dict[str, Any]:
                 | extend GeoInfo = parse_json(LocationDetails)
                 | extend Country = tostring(GeoInfo.countryOrRegion)
                 | extend City = tostring(GeoInfo.city)
-                | summarize 
+                | summarize
                     FailedAttempts = count(),
                     UniqueIPs = dcount(IPAddress),
                     Countries = make_set(Country, 10)
@@ -161,7 +161,7 @@ def example_performance_optimized() -> Dict[str, Any]:
                 .PerformanceCounters
                 | where TimeGenerated >= ago(1h)
                 | where CounterName in ('% Processor Time', 'Available MBytes')
-                | summarize 
+                | summarize
                     AvgValue = avg(CounterValue),
                     MaxValue = max(CounterValue),
                     MinValue = min(CounterValue)

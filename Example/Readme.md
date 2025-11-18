@@ -1,17 +1,17 @@
-# 🔍 MCP KQL Server Examples
+# ðŸ” MCP KQL Server Examples
 
 A powerful tool that enables seamless KQL query execution directly from your development environment. Perfect for data analysis and visualization!
 
-## 📊 Query Examples
+## ðŸ“Š Query Examples
 
-### 🎯 Basic Query Execution
+### ðŸŽ¯ Basic Query Execution
 ![KQL Query Example](image-1.png)
 > Simple KQL query showing data retrieval in Treeview format
 
 ![Query Results](image-2.png)
 > Clean visualization of interactive tree d3 json tree view results
 
-### 🔮 Advanced Analysis
+### ðŸ”® Advanced Analysis
 ![Complex Query](image-3.png)
 > Advanced KQL query demonstration with data insights intruction
 
@@ -19,9 +19,9 @@ A powerful tool that enables seamless KQL query execution directly from your dev
 ![Additional Insights](image-6.png)
 > Detailed output visualization of data insights and additional information
 
-## ✨ Key Features
-- 🔗 Direct Azure Data Explorer integration
-- 📈 Rich visualization support
-- 🛠️ Easy-to-use query interface
+## âœ¨ Key Features
+- ðŸ”— Direct Azure Data Explorer integration
+- ðŸ“ˆ Rich visualization support
+- ðŸ› ï¸ Easy-to-use query interface
 
-> 💡 **Pro Tip**: Use MCP KQL Server for quick data exploration and analysis and also you can communicate with the KQL output.
+> ðŸ’¡ **Pro Tip**: Use MCP KQL Server for quick data exploration and analysis and also you can communicate with the KQL output.
