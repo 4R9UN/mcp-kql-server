@@ -63,16 +63,16 @@ def main():
             print(f"⚠️  File not found: {file_path}")
     
     print(f"\n✅ Updated {updated_count} file(s)")
-    print(f"\n📝 Next steps:")
+    print("\n📝 Next steps:")
     print(f"   1. Update RELEASE_NOTES.md with v{new_version} changes")
-    print(f"   2. Run: git add .")
+    print("   2. Run: git add .")
     print(f"   3. Run: git commit -m 'Bump version to {new_version}'")
-    print(f"   4. Run: git push origin main")
-    print(f"   5. Run: python -m build")
-    print(f"   6. Run: twine upload dist/*")
+    print("   4. Run: git push origin main")
+    print("   5. Run: python -m build")
+    print("   6. Run: twine upload dist/*")
     print(f"   7. Run: git tag v{new_version}")
     print(f"   8. Run: git push origin v{new_version}")
-    print(f"\n   GitHub Actions will automatically publish to MCP Registry!")
+    print("\n   GitHub Actions will automatically publish to MCP Registry!")
 
 
 if __name__ == "__main__":
