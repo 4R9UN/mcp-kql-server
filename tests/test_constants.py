@@ -11,7 +11,7 @@ def test_version_constants():
     try:
         from mcp_kql_server.constants import __version__
 
-        assert __version__ == "2.0.7"
+        assert __version__ == "2.0.8"
     except ImportError:
         # Skip test if module not available in CI
         pass
@@ -26,7 +26,7 @@ def test_server_constants():
             SERVER_NAME,
         )
 
-        assert SERVER_NAME == "mcp-kql-server(2.0.7)"
+        assert SERVER_NAME == "mcp-kql-server(2.0.8)"
         assert DEFAULT_CONNECTION_TIMEOUT > 0
         assert DEFAULT_QUERY_TIMEOUT > 0
 

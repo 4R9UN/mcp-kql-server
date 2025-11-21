@@ -3,6 +3,7 @@ KQL Authentication Module
 
 This module handles Azure CLI authentication for KQL cluster access.
 Provides cached authentication checking and device code flow authentication.
+Supports AzureCliCredential for async clients.
 
 Author: Arjun Trivedi
 Email: arjuntrivedi42@yahoo.com
@@ -13,11 +14,19 @@ import platform
 import os
 import logging
 from functools import lru_cache
-from tenacity import retry, stop_after_attempt, wait_exponential
 from typing import Dict, Any
+from tenacity import retry, stop_after_attempt, wait_exponential
+from azure.identity import AzureCliCredential
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+@lru_cache(maxsize=1)
+def get_azure_credential() -> AzureCliCredential:
+    """
+    Get the Azure CLI credential for async clients.
+    """
+    return AzureCliCredential()
 
 @lru_cache(maxsize=1)
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -70,7 +79,7 @@ def trigger_az_cli_auth():
         )
         result = subprocess.run(
             [az_command, "login", "--use-device-code"],
-            capture_output=True, text=True, env=env, timeout=120
+            capture_output=True, text=True, env=env, timeout=120, check=False
         )
         if result.returncode == 0:
             logger.info("Azure CLI login successful.")

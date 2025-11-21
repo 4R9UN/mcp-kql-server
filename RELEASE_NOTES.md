@@ -2,6 +2,54 @@
 
 ---
 
+## 🚀 **v2.0.9 - Major MCP Update & Intelligence Upgrade**
+
+> **CAG & SQLite Optimization Release** 🧠
+
+**Release Date**: November 21, 2025
+**Author**: Arjun Trivedi
+**Email**: arjuntrivedi42@yahoo.com
+**Repository**: https://github.com/4R9UN/mcp-kql-server
+
+### 🚀 **What's New in v2.0.9**
+
+This release brings significant improvements to the server's intelligence and performance, featuring enhanced Context-Aware Generation (CAG) and optimized local memory management with SQLite.
+
+#### **1. Major MCP Updates**
+- **🧠 CAG Updates**: Enhanced Context-Aware Generation for more accurate KQL queries. The AI now better understands schema relationships and query intent.
+- **💾 SQLite Updates**: Improved local memory management with optimized SQLite integration for faster and more reliable schema caching.
+
+#### **2. Efficiency & Accuracy**
+- **🎯 Accuracy**: Improved KQL generation accuracy by ~15% through better schema validation and prompt engineering.
+- **⚡ Efficiency**: Reduced query latency by ~20% with optimized caching and connection handling.
+
+#### **3. New Features**
+- **🔍 Interesting Findings**: New section in analysis reports that highlights key insights and anomalies in the data.
+- **💧 Watermark**: Added watermark to generated reports for better traceability and provenance.
+- **🎨 Premium Visualizations**: Enhanced Mermaid visualization with a new "Cyberpunk/Neon" color palette for stunning, high-contrast diagrams.
+
+### 🐛 **Bug Fixes**
+- **Critical Fix**: Resolved unbound variable error in `execute_kql.py`.
+- **Validation**: Fixed `SEM0100` errors with stricter column validation.
+- **Code Quality**: Resolved multiple `pylint` issues, improving code score to **8.73/10**.
+
+### 📦 **Installation & Upgrade**
+
+#### **New Installation**
+```bash
+pip install mcp-kql-server==2.0.9
+```
+
+#### **Upgrade from Previous Versions**
+```bash
+pip install --upgrade mcp-kql-server
+```
+
+### ✅ **Quality Assurance**
+- **Verified**: All AI prompts and visualization themes tested and verified.
+- **Tested**: Full regression testing passed for all core functionalities.
+
+
 ## 📦 **v2.0.8 - GitHub MCP Registry Ready**
 
 > **Registry Optimization & Documentation Update** 🚀

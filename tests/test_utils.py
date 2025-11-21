@@ -14,13 +14,10 @@ import pytest
 
 from mcp_kql_server.utils import (
     ensure_directory_exists,
-    fix_query_with_real_schema,
     get_default_cluster_memory_path,
     get_schema_discovery,
     get_schema_discovery_status,
     sanitize_filename,
-    validate_all_query_columns,
-    validate_projected_columns,
 )
 
 
@@ -81,58 +78,6 @@ class TestSchemaDiscovery:
         assert hasattr(discovery, "get_column_mapping_from_schema")
 
 
-class TestQueryValidation:
-    """Test cases for KQL query validation functions."""
-
-    def test_validate_projected_columns_no_schema(self):
-        """Test column validation with no schema."""
-        query = "MyTable | project Column1, Column2"
-        result = validate_projected_columns(query, {})
-        assert result == query  # Should return unchanged
-
-    def test_validate_projected_columns_with_schema(self):
-        """Test column validation with schema."""
-        query = "MyTable | project Column1, Column2, InvalidColumn"
-        schema = {"columns": ["Column1", "Column2", "ValidColumn"], "table": "MyTable"}
-        result = validate_projected_columns(query, schema)
-        # Should remove invalid columns and keep valid ones
-        assert "Column1" in result
-        assert "Column2" in result
-        assert (
-            "InvalidColumn" not in result or result == query
-        )  # Might be kept if considered expression
-
-    def test_validate_all_query_columns_no_schema(self):
-        """Test comprehensive query validation with no schema."""
-        query = "MyTable | where Column1 == 'test'"
-        result = validate_all_query_columns(query, {})
-        assert result == query  # Should return unchanged
-
-    def test_validate_all_query_columns_with_schema(self):
-        """Test comprehensive query validation with schema."""
-        query = "MyTable | where column1 == 'test' | project COLUMN1"
-        schema = {"columns": ["Column1", "Column2"], "table": "MyTable"}
-        result = validate_all_query_columns(query, schema)
-        # Should fix case issues
-        assert "Column1" in result
-
-
-class TestQueryFixing:
-    """Test cases for query fixing functionality."""
-
-    def test_fix_query_with_real_schema_no_cluster_info(self):
-        """Test query fixing when no cluster info can be extracted."""
-        query = "MyTable | where Column1 == 'test'"
-        result = fix_query_with_real_schema(query)
-        assert result == query  # Should return unchanged
-
-    def test_fix_query_with_real_schema_invalid_format(self):
-        """Test query fixing with invalid cluster format."""
-        query = "invalid_query_format"
-        result = fix_query_with_real_schema(query)
-        assert result == query  # Should return unchanged
-
-
 class TestEdgeCases:
     """Test edge cases and error conditions."""
 
@@ -142,23 +87,11 @@ class TestEdgeCases:
         result = sanitize_filename("")
         assert result == ""
 
-        # Test validate_projected_columns with empty query
-        result = validate_projected_columns("", {})
-        assert result == ""
-
-        # Test validate_all_query_columns with empty query
-        result = validate_all_query_columns("", {})
-        assert result == ""
-
     def test_none_inputs(self):
         """Test handling of None inputs."""
         # Test functions with None schema
-        query = "test query"
-        result = validate_projected_columns(query, None)
-        assert result == query
-
-        result = validate_all_query_columns(query, None)
-        assert result == query
+        # (Removed tests for validate_projected_columns and validate_all_query_columns)
+        pass
 
 
 class TestSchemaDiscoveryMethods:

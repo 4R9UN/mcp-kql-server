@@ -11,37 +11,29 @@ Email: arjuntrivedi42@yahoo.com
 import asyncio
 import logging
 import re
+import time
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import numpy as np
 from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
 from azure.kusto.data.exceptions import KustoServiceError
 
+from .constants import (
+    DEFAULT_CONNECTION_TIMEOUT
+)
+from .memory import get_memory_manager
 from .utils import (
     extract_cluster_and_database_from_query,
     extract_tables_from_query,
     generate_query_description,
-    QueryProcessor,
     retry_on_exception
 )
 
 logger = logging.getLogger(__name__)
 
-# Global QueryProcessor instance for consistent query processing
-_query_processor = None
 
-def get_query_processor():
-    """Lazy load query processor to avoid circular imports."""
-    global _query_processor  # pylint: disable=global-statement
-    if _query_processor is None:
-        try:
-            from .memory import get_memory_manager
-            memory = get_memory_manager()
-            _query_processor = QueryProcessor(memory)
-        except (ImportError, AttributeError, ValueError) as e:
-            logger.warning("QueryProcessor not available: %s", e)
-            _query_processor = None
-    return _query_processor
 
 # Import schema validator at module level - now from memory.py
 _schema_validator = None
@@ -51,7 +43,6 @@ def get_schema_validator():
     global _schema_validator  # pylint: disable=global-statement
     if _schema_validator is None:
         try:
-            from .memory import get_memory_manager
             memory = get_memory_manager()
             # Schema validator is now part of MemoryManager
             _schema_validator = memory
@@ -61,425 +52,15 @@ def get_schema_validator():
     return _schema_validator
 
 
-def classify_error_dynamically(error_message: str, status_code: Optional[int] = None) -> Dict[str, Any]:
-    """
-    Dynamically classify errors to determine retry strategy and handling approach.
 
-    Replaces static RETRYABLE_ERROR_PATTERNS with intelligent error analysis.
 
-    Returns:
-        Dict with keys: is_retryable, error_category, suggested_action, retry_delay
-    """
-    if not error_message:
-        return {
-            "is_retryable": False,
-            "error_category": "unknown",
-            "suggested_action": "investigate",
-            "retry_delay": 0
-        }
 
-    error_lower = error_message.lower()
 
-    # Network and connection errors - highly retryable
-    network_indicators = [
-        "connection", "timeout", "network", "socket", "dns", "host",
-        "unreachable", "refused", "reset", "aborted"
-    ]
-    if any(indicator in error_lower for indicator in network_indicators):
-        return {
-            "is_retryable": True,
-            "error_category": "network",
-            "suggested_action": "retry_with_backoff",
-            "retry_delay": 2.0
-        }
 
-    # Service availability errors - retryable with longer delay
-    service_indicators = [
-        "service", "unavailable", "busy", "overload", "throttl", "rate limit",
-        "too many requests", "capacity", "resource exhausted"
-    ]
-    if any(indicator in error_lower for indicator in service_indicators):
-        return {
-            "is_retryable": True,
-            "error_category": "service_availability",
-            "suggested_action": "retry_with_longer_delay",
-            "retry_delay": 5.0
-        }
 
-    # Authentication errors - potentially retryable if token-related
-    auth_indicators = ["token", "expired", "authentication", "unauthorized"]
-    if any(indicator in error_lower for indicator in auth_indicators):
-        if "expired" in error_lower or "refresh" in error_lower:
-            return {
-                "is_retryable": True,
-                "error_category": "auth_token",
-                "suggested_action": "refresh_token_and_retry",
-                "retry_delay": 1.0
-            }
-        else:
-            return {
-                "is_retryable": False,
-                "error_category": "auth_permanent",
-                "suggested_action": "check_credentials",
-                "retry_delay": 0
-            }
 
-    # Syntax and validation errors - not retryable
-    syntax_indicators = [
-        "syntax", "invalid", "malformed", "parse", "validation",
-        "bad request", "semantic", "syn0002", "sem0001"
-    ]
-    if any(indicator in error_lower for indicator in syntax_indicators):
-        return {
-            "is_retryable": False,
-            "error_category": "syntax",
-            "suggested_action": "fix_query_syntax",
-            "retry_delay": 0
-        }
 
-    # Permission errors - not retryable
-    permission_indicators = ["forbidden", "permission", "access denied", "not authorized"]
-    if any(indicator in error_lower for indicator in permission_indicators):
-        return {
-            "is_retryable": False,
-            "error_category": "permission",
-            "suggested_action": "check_permissions",
-            "retry_delay": 0
-        }
 
-    # Resource not found - not retryable
-    notfound_indicators = ["not found", "does not exist", "missing", "unknown table", "unknown database"]
-    if any(indicator in error_lower for indicator in notfound_indicators):
-        return {
-            "is_retryable": False,
-            "error_category": "resource_not_found",
-            "suggested_action": "verify_resource_exists",
-            "retry_delay": 0
-        }
-
-    # Status code-based classification
-    if status_code:
-        if 500 <= status_code < 600:
-            return {
-                "is_retryable": True,
-                "error_category": "server_error",
-                "suggested_action": "retry_with_backoff",
-                "retry_delay": 3.0
-            }
-        elif status_code == 429:
-            return {
-                "is_retryable": True,
-                "error_category": "rate_limit",
-                "suggested_action": "retry_with_longer_delay",
-                "retry_delay": 10.0
-            }
-        elif 400 <= status_code < 500:
-            return {
-                "is_retryable": False,
-                "error_category": "client_error",
-                "suggested_action": "fix_request",
-                "retry_delay": 0
-            }
-
-    # Check for specific Kusto error codes
-    if "sem0100" in error_lower or "sem0001" in error_lower:
-        return {
-            "is_retryable": False,
-            "error_category": "syntax",
-            "suggested_action": "fix_query_syntax",
-            "retry_delay": 0
-        }
-
-    # Default classification for unknown errors - conservative retry
-    return {
-        "is_retryable": True,
-        "error_category": "unknown",
-        "suggested_action": "retry_with_caution",
-        "retry_delay": 2.0
-    }
-
-
-def should_retry_error(error_message: str, status_code: Optional[int] = None) -> bool:
-    """
-    Determine if an error should be retried using dynamic classification.
-
-    Replaces static pattern matching with intelligent error analysis.
-    """
-    classification = classify_error_dynamically(error_message, status_code)
-    return classification["is_retryable"]
-
-
-
-
-def clean_query_for_execution(query: str) -> str:
-    """
-    Cleans a KQL query to prevent common syntax errors, including SEM0002.
-    - Strips leading/trailing whitespace.
-    - Returns an empty string if the query is genuinely empty or only contains whitespace.
-    - Handles queries that contain only comments by returning an empty string.
-    """
-    if not query or not query.strip():
-        return ""
-
-    # Strip leading/trailing whitespace for clean processing.
-    query = query.strip()
-
-    # Handle comment-only queries.
-    lines = query.split('\n')
-    non_comment_lines = [line for line in lines if not line.strip().startswith('//')]
-
-    if not non_comment_lines:
-        # If all lines are comments, there's no executable query.
-        return ""
-
-    # Reconstruct the query from non-comment lines.
-    cleaned_query = '\n'.join(non_comment_lines).strip()
-
-    # Apply additional normalization only if we have content
-    if cleaned_query:
-        # Apply core syntax normalization
-        cleaned_query = normalize_kql_syntax(cleaned_query)
-
-        # Apply dynamic error-based fixes
-        cleaned_query = _apply_dynamic_fixes(cleaned_query)
-
-    return cleaned_query
-
-def normalize_kql_syntax(query: str) -> str:
-    """Optimized KQL syntax normalization with comprehensive error prevention."""
-    if not query:
-        return ""
-
-    # Normalize whitespace
-    query = re.sub(r'\s+', ' ', query.strip())
-
-    # Dynamic regex patterns for common KQL errors
-    error_patterns = [
-        (r'\|([a-zA-Z])', r'| \1'),  # Fix pipe spacing
-        (r'([a-zA-Z0-9_])(==|!=|<=|>=|<|>)([a-zA-Z0-9_])', r'\1 \2 \3'),  # Operator spacing
-        (r'\|\|+', '|'),  # Double pipes
-        (r'\s*\|\s*', ' | '),  # Pipe normalization
-        (r'\s+(and|or|==|!=|<=|>=|<|>)\s*$', ''),  # Trailing operators
-        (r';\s*$', ''),  # Semicolons
-    ]
-
-    for pattern, replacement in error_patterns:
-        query = re.sub(pattern, replacement, query, flags=re.IGNORECASE)
-
-    # Normalize project clauses
-    query = re.sub(r'\|\s*project\s+([^|]+)',
-                   lambda m: '| project ' + _normalize_project_clause(m.group(1)), query)
-
-    return query.strip()
-
-def _apply_dynamic_fixes(query: str) -> str:
-    """Apply minimal, conservative fixes to prevent SYN0002, SEM0100, and other common errors without over-processing."""
-    if not query or not query.strip():
-        return query  # Return original if empty to preserve intent
-
-    original_query = query
-    query = query.strip()
-
-    # CONSERVATIVE APPROACH: Only fix clear syntax errors, avoid aggressive transformations
-
-    # 1. Remove trailing incomplete operators that cause SYN0002 (but only obvious cases)
-    # Only remove if query ends with operator and nothing else
-    if re.search(r'\s+(and|or)\s*$', query, re.IGNORECASE):
-        fixed_query = re.sub(r'\s+(and|or)\s*$', '', query, flags=re.IGNORECASE)
-        if fixed_query.strip():  # Only apply if result is not empty
-            query = fixed_query
-            logger.debug("Removed trailing logical operator")
-
-    # 2. Fix incomplete pipe operations - only if query literally ends with "|"
-    if query.rstrip().endswith('|'):
-        fixed_query = query.rstrip('|').strip()
-        if fixed_query.strip():  # Only apply if result is not empty
-            query = fixed_query
-            logger.debug("Removed trailing pipe operator")
-        # DON'T auto-add "| take 10" - let the user specify what they want
-
-    # 3. Fix obvious double operators (but be conservative)
-    if re.search(r'(==|!=|<=|>=)\s*(==|!=|<=|>=)', query):
-        query = re.sub(r'(==|!=|<=|>=)\s*(==|!=|<=|>=)', r'\1', query)
-        logger.debug("Fixed double comparison operators")
-
-    # 4. Fix malformed project clauses (only obvious syntax errors)
-    if re.search(r'\|\s*project\s*,', query, re.IGNORECASE):
-        query = re.sub(r'\|\s*project\s*,', '| project', query, flags=re.IGNORECASE)
-        logger.debug("Fixed project clause starting with comma")
-
-    # 5. SEM0001 fixes - join syntax (minimal fixes only)
-    if ' join ' in query.lower():
-        query = _fix_join_syntax(query)
-
-    # 6. REMOVED: Don't auto-complete incomplete expressions - let syntax validation catch them
-    # This was too aggressive and could break valid queries
-
-    # 7. REMOVED: Don't auto-add "| take 10" - preserve user intent
-
-    # Final safety check - if processing resulted in empty query, return original
-    if not query.strip():
-        logger.warning("Query processing resulted in empty query, returning original")
-        return original_query
-
-    return query
-
-def _fix_join_syntax(query: str) -> str:
-    """Fix common join syntax issues dynamically."""
-    # Replace 'or' with 'and' in join conditions (SEM0001 prevention)
-    join_pattern = re.compile(r'(\bjoin\b\s+(?:\w+\s+)?(?:\([^)]+\)\s+)?(?:\w+\s+)?on\s+)([^|]+)', re.IGNORECASE)
-
-    def fix_join_condition(match):
-        prefix, condition = match.groups()
-        # Replace 'or' with 'and' in join context
-        condition = re.sub(r'\bor\b', 'and', condition, flags=re.IGNORECASE)
-        # Ensure equality operators only
-        condition = re.sub(r'\b(\w+)\s*!=\s*(\w+)', r'\1 == \2', condition)
-        return prefix + condition
-
-    return join_pattern.sub(fix_join_condition, query)
-
-def _normalize_project_clause(project_content: str) -> str:
-    """
-    Enhanced normalize project clause to prevent column resolution errors.
-    """
-    if not project_content:
-        return "*"
-
-    # Split on commas and clean each column
-    columns = []
-    for col in project_content.split(','):
-        col = col.strip()
-        if col:
-            # Remove any trailing operators or incomplete expressions
-            col = re.sub(r'\s+(and|or|==|!=|<=|>=|<|>)\s*$', '', col, flags=re.IGNORECASE)
-            if col:  # Only add if still has content
-                # Apply bracketing for potentially problematic column names
-                if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', col) and not col.startswith('['):
-                    # Check if this looks like a problematic column name
-                    col_lower = col.lower()
-                    problematic_patterns = {
-                        'entityvalue', 'entitytype', 'evidencetype', 'alertname', 'alerttype',
-                        'username', 'computername', 'processname', 'filename', 'filepath'
-                    }
-
-                    from .constants import KQL_RESERVED_WORDS
-                    if (col_lower in {w.lower() for w in KQL_RESERVED_WORDS} or
-                        col_lower in problematic_patterns or
-                        re.match(r'^[A-Z][a-z]+[A-Z]', col)):  # CamelCase pattern
-                        col = f"['{col}']"
-
-                columns.append(col)
-
-    return ', '.join(columns) if columns else "*"
-
-
-def validate_kql_query_syntax(query: str) -> Tuple[bool, str]:
-    """
-    Conservative KQL query syntax validation focused on preventing critical errors.
-    Only validates essential syntax issues, allows more queries through.
-
-    Returns:
-        Tuple of (is_valid: bool, error_message: str)
-    """
-    try:
-        if not query or not query.strip():
-            return False, "Query cannot be empty"
-
-        query_clean = query.strip()
-        query_lower = query_clean.lower()
-
-        # Check for management commands (permissive)
-        if query_lower.startswith('.'):
-            # Allow most management commands, only block obviously invalid ones
-            invalid_mgmt_patterns = ['.invalid', '.bad', '.error']
-            if any(pattern in query_lower for pattern in invalid_mgmt_patterns):
-                return False, "Invalid management command"
-            return True, ""
-
-        # CONSERVATIVE VALIDATION: Only check for critical syntax errors
-
-        # 0. Check for invalid KQL operators (NEW: prevents common AI generation errors)
-        from .constants import KQL_INVALID_OPERATOR_PATTERN
-        invalid_op_match = KQL_INVALID_OPERATOR_PATTERN.search(query_clean)
-        if invalid_op_match:
-            invalid_op = invalid_op_match.group(0)
-            # Provide helpful correction suggestion
-            if '! ' in invalid_op:
-                correct_op = invalid_op.replace('! ', '!')
-                return False, f"Invalid operator '{invalid_op}' with space. Use '{correct_op}' (no space between ! and operator), or use 'not' keyword: 'not (condition)'"
-            elif '!has_any' in invalid_op.lower():
-                return False, "Invalid operator '!has_any' does not exist. Use '!in' for list exclusion: 'column !in (list)', or 'not (column has_any (list))'"
-            else:
-                return False, f"Invalid KQL operator: '{invalid_op}'. Check KQL operator syntax."
-
-        # 1. Check for incomplete operators at the end (only obvious cases)
-        if re.search(r'\s+(and|or)\s*$', query_clean, re.IGNORECASE):
-            return False, "Query ends with incomplete logical operator"
-
-        # 2. Check for incomplete pipe operations (only if literally ends with "|")
-        if query_clean.rstrip().endswith('|'):
-            return False, "Query ends with incomplete pipe operator"
-
-        # 3. Check for double pipes (clear syntax error)
-        if '||' in query_clean:
-            return False, "Invalid double pipe operator (||) - use single pipe (|)"
-
-        # 4. RELAXED: Only check for completely empty operations (more permissive)
-        critical_empty_operations = [
-            (r'\|\s*project\s*$', "Empty project clause"),
-            (r'\|\s*where\s*$', "Empty where clause"),
-        ]
-
-        for pattern, error_msg in critical_empty_operations:
-            if re.search(pattern, query_clean, re.IGNORECASE):
-                return False, f"{error_msg}"
-
-        # 5. RELAXED: Project validation (only check for obvious syntax errors)
-        project_match = re.search(r'\|\s*project\s+([^|]*)', query_clean, re.IGNORECASE)
-        if project_match:
-            project_content = project_match.group(1).strip()
-            # Only fail on completely empty project content
-            if not project_content:
-                return False, "Empty project clause"
-            # Only check for obvious comma errors
-            if re.search(r',\s*,', project_content):
-                return False, "Project clause has empty column between commas"
-
-        # 6. RELAXED: Don't enforce table name patterns - too restrictive
-        # Remove the table name validation entirely as it was too aggressive
-
-        # 7. Check for unmatched parentheses (still important)
-        open_parens = query_clean.count('(')
-        close_parens = query_clean.count(')')
-        if open_parens != close_parens:
-            return False, f"Unmatched parentheses: {open_parens} open, {close_parens} close"
-
-        # 8. Check for unmatched quotes (still important)
-        single_quotes = query_clean.count("'")
-        if single_quotes % 2 != 0:
-            return False, "Unmatched single quotes in query"
-
-        # 9. REMOVED: Invalid character validation was too restrictive
-
-        # 10. RELAXED: Join validation - only warn, don't fail
-        if 'join' in query_lower:
-            logger.debug("Query contains join operation: %s", query_clean[:100])
-
-        # 11. RELAXED: Where clause validation - only check for empty content
-        where_match = re.search(r'\|\s*where\s+([^|]*)', query_clean, re.IGNORECASE)
-        if where_match:
-            where_content = where_match.group(1).strip()
-            if not where_content:
-                return False, "Empty where clause"
-            # REMOVED: Don't fail on trailing logical operators - let KQL engine handle it
-
-        return True, ""
-
-    except (ValueError, TypeError, AttributeError) as e:
-        # Be more permissive - don't fail on validation errors
-        logger.warning("Syntax validation error: %s", str(e))
-        return True, ""  # Allow query through if validation itself fails
 
 
 def validate_query(query: str) -> Tuple[str, str]:
@@ -569,6 +150,7 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _time
     logger.info("Executing KQL on %s/%s: %s...", cluster_url, database, kql_query[:150])
 
     client = _get_kusto_client(cluster_url)
+    start_time = time.time()
     try:
         is_mgmt_query = kql_query.strip().startswith('.')
 
@@ -579,38 +161,35 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _time
             else:
                 response = client.execute(database, kql_query)
 
+            execution_time_ms = (time.time() - start_time) * 1000
             df = _parse_kusto_response(response)
-            logger.debug("Query returned %d rows.", len(df))
+            logger.debug("Query returned %d rows in %.2fms.", len(df), execution_time_ms)
 
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(_post_execution_learning_bg(kql_query, cluster, database, df))
+                loop.create_task(_post_execution_learning_bg(kql_query, cluster, database, df, execution_time_ms))
             except RuntimeError:
                 logger.debug("No event loop running - skipping background learning task")
 
             return df
 
         except KustoServiceError as e:
-            # Check if this is a retryable SEM0100-like error
-            classification = classify_error_dynamically(str(e))
-            if classification.get('is_retryable') and 'sem0100' in str(e).lower():
-                logger.info("SEM0100 error detected, attempting auto-bracketing retry: %s", str(e)[:100])
+            error_str = str(e)
+            # Check for SEM0100 (Missing Column) or "Failed to resolve" errors
+            if 'sem0100' in error_str.lower() or "failed to resolve scalar expression" in error_str.lower():
+                logger.info("SEM0100 error detected: %s", error_str[:100])
 
-                bracketed_query = bracket_suspect_identifiers(kql_query)
-                if bracketed_query != kql_query:
-                    logger.debug("Retrying with bracketed identifiers: %s", bracketed_query[:150])
-                    if is_mgmt_query:
-                        response = client.execute_mgmt(database, bracketed_query)
-                    else:
-                        response = client.execute(database, bracketed_query)
+                # Trigger schema refresh for involved tables to prevent future errors
+                try:
+                    tables = extract_tables_from_query(kql_query)
+                    if tables:
+                        loop = asyncio.get_running_loop()
+                        # Force refresh schema for these tables
+                        loop.create_task(_ensure_schema_discovered(cluster, database, tables))
+                except (RuntimeError, Exception) as refresh_error:
+                    logger.debug("Failed to trigger schema refresh on error: %s", refresh_error)
 
-                    df = _parse_kusto_response(response)
-                    logger.info("SEM0100 retry successful - query returned %d rows", len(df))
-                    return df
-                else:
-                    logger.warning("Auto-bracketing did not change the query, re-raising original error")
-
-            # Re-raise the original error if not retryable or retry failed
+            # Re-raise the original error
             raise
 
     finally:
@@ -631,91 +210,7 @@ def execute_large_query(query: str, cluster: str, database: str, _chunk_size: in
     # Fallback: single execution with configured timeout & retries
     return _execute_kusto_query_sync(query, cluster, database, timeout)
 
-def bracket_suspect_identifiers(query: str) -> str:
-    """
-    Enhanced auto-bracket identifiers that might cause SEM0100 resolution errors.
 
-    This function brackets:
-    - Reserved keywords when used as identifiers
-    - Identifiers starting with numbers
-    - Identifiers containing special characters
-    - Column names that commonly cause resolution failures
-    """
-    if not query:
-        return query
-
-    from .constants import KQL_RESERVED_WORDS
-
-    # Additional patterns that commonly cause SEM0100 errors
-    problematic_patterns = {
-        'entityvalue', 'entitytype', 'evidencetype', 'alertname', 'alerttype',
-        'username', 'computername', 'processname', 'filename', 'filepath',
-        'ipaddress', 'domainname', 'accountname', 'logontype', 'eventtype'
-    }
-
-    def bracket_match(match):
-        ident = match.group(0)
-        ident_lower = ident.lower()
-
-        # Skip if already in quotes or brackets
-        if match.start() > 0:
-            prev_char = query[match.start() - 1]
-            if prev_char in ["'", '"', '[']:
-                return ident
-
-        # Check if it's a reserved keyword
-        if ident_lower in {w.lower() for w in KQL_RESERVED_WORDS}:
-            return f"['{ident}']"
-
-        # Check if it's a problematic pattern
-        if ident_lower in problematic_patterns:
-            return f"['{ident}']"
-
-        # Check if it starts with a number
-        if re.match(r'^\d', ident):
-            return f"['{ident}']"
-
-        # Check if it contains special characters that need bracketing
-        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', ident):
-            return f"['{ident}']"
-
-        # Check for CamelCase patterns that might need bracketing
-        if re.match(r'^[A-Z][a-z]+[A-Z]', ident):
-            return f"['{ident}']"
-
-        return ident
-
-    # More precise regex that handles project clauses specifically
-    # First, handle project clauses specially
-    def bracket_project_columns(project_match):
-        project_content = project_match.group(1)
-
-        # Split columns and bracket each one
-        columns = []
-        for col in project_content.split(','):
-            col = col.strip()
-            if col and not col.startswith('[') and not col.startswith("'"):
-                # Apply bracketing logic to each column
-                if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', col):
-                    col_lower = col.lower()
-                    if (col_lower in {w.lower() for w in KQL_RESERVED_WORDS} or
-                        col_lower in problematic_patterns or
-                        re.match(r'^[A-Z][a-z]+[A-Z]', col)):
-                        col = f"['{col}']"
-                columns.append(col)
-            else:
-                columns.append(col)
-
-        return f"| project {', '.join(columns)}"
-
-    # Handle project clauses first
-    query = re.sub(r'\|\s*project\s+([^|]+)', bracket_project_columns, query, flags=re.IGNORECASE)
-
-    # Then handle other identifiers (but avoid those already in project clauses)
-    # This regex is more careful to avoid double-bracketing
-    query = re.sub(r"(?<!['\"[\]])\b([A-Za-z_][A-Za-z0-9_]*)\b(?![\]'\"])", bracket_match, query)
-
-    return query
 
 
 # Essential functions for compatibility
@@ -759,115 +254,15 @@ def validate_kql_query_advanced(query: str, cluster: Optional[str] = None, datab
 
 def kql_execute_tool(kql_query: str, cluster_uri: Optional[str] = None, database: Optional[str] = None) -> pd.DataFrame:
     """
-    Enhanced KQL execution function with consolidated QueryProcessor pipeline.
+    Simplified KQL execution function.
+    Executes the query directly without internal generation or complex pre-processing.
     """
     try:
-        # ENHANCED INPUT VALIDATION with detailed error messages
         if not kql_query or not kql_query.strip():
             logger.error("Empty query provided to kql_execute_tool")
             raise ValueError("KQL query cannot be None or empty")
 
-        original_query = kql_query
-
-        # Get the QueryProcessor for consolidated processing
-        processor = get_query_processor()
-
-        if processor and cluster_uri and database:
-            try:
-                # Use the QueryProcessor's consolidated pipeline
-                logger.info("Starting consolidated query processing pipeline...")
-
-                # Handle async context properly for the processing pipeline
-                try:
-                    asyncio.get_running_loop()
-                    # We're in an async context - skip for now to avoid conflicts
-                    logger.info("Async context detected - using simplified processing")
-                    clean_query = processor.clean(kql_query)
-
-                    # Apply basic optimization without full async validation
-                    if cluster_uri and database:
-                        try:
-                            # Get schema for optimization
-                            from .memory import get_memory_manager
-                            memory = get_memory_manager()
-                            tables = extract_tables_from_query(clean_query)
-                            if tables:
-                                target_table = tables[0]
-                                schema_info = memory.get_schema(cluster_uri, database, target_table, enable_fallback=False)
-                                if schema_info:
-                                    clean_query = processor.optimize(clean_query, schema_info)
-                                    logger.info("Applied QueryProcessor optimization")
-                        except (ValueError, TypeError, KeyError, AttributeError) as opt_error:
-                            logger.debug("Schema-based optimization failed: %s", opt_error)
-
-                except RuntimeError:
-                    # No running loop, safe to use full async pipeline
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        clean_query = loop.run_until_complete(
-                            processor.process(kql_query, cluster_uri, database)
-                        )
-                        logger.info("QueryProcessor pipeline completed successfully")
-                    finally:
-                        loop.close()
-                        asyncio.set_event_loop(None)
-
-            except (ValueError, TypeError, RuntimeError, AttributeError) as processing_error:
-                logger.error("QueryProcessor pipeline failed: %s", processing_error)
-                # Fallback to basic cleaning
-                clean_query = clean_query_for_execution(kql_query)
-        else:
-            logger.warning("QueryProcessor not available - using legacy processing")
-            # Fallback to legacy processing
-            clean_query = clean_query_for_execution(kql_query)
-
-        # Check if processing resulted in empty query
-        if not clean_query or not clean_query.strip():
-            logger.warning("Query processing resulted in empty query from: %s", original_query[:100])
-            raise ValueError("Query appears to be empty or contains only comments/whitespace")
-
-        # COMPREHENSIVE SYNTAX VALIDATION with fallback repair attempts
-        is_valid, validation_error = validate_kql_query_syntax(clean_query)
-        if not is_valid:
-            logger.warning("Syntax validation failed: %s", validation_error)
-
-            # FALLBACK STRATEGY 1: Try to repair common syntax issues
-            logger.info("Attempting query repair...")
-            repaired_query = _apply_dynamic_fixes(clean_query)
-
-            # Ensure repair didn't create empty query
-            if not repaired_query or not repaired_query.strip():
-                logger.error("Query repair resulted in empty query")
-                raise ValueError(f"Invalid KQL syntax and repair failed: {validation_error}")
-
-            # Re-validate repaired query
-            is_repaired_valid, repair_validation_error = validate_kql_query_syntax(repaired_query)
-            if is_repaired_valid:
-                logger.info("Query successfully repaired")
-                clean_query = repaired_query
-            else:
-                logger.error("Query repair failed: %s", repair_validation_error)
-                # FALLBACK STRATEGY 2: Try minimal safe query if possible
-                if cluster_uri and database:
-                    logger.info("Applying minimal safe query fallback")
-                    try:
-                        tables = extract_tables_from_query(original_query)
-                        if tables:
-                            safe_query = f"{tables[0]} | take 10"
-                            safe_valid, _ = validate_kql_query_syntax(safe_query)
-                            if safe_valid:
-                                clean_query = safe_query
-                                logger.info("Applied safe fallback query: %s", safe_query)
-                            else:
-                                raise ValueError(f"Cannot create safe fallback query. Original error: {validation_error}")
-                        else:
-                            raise ValueError(f"No tables found for fallback. Original error: {validation_error}")
-                    except Exception as fallback_error:
-                        logger.error("Safe fallback failed: %s", fallback_error)
-                        raise ValueError(f"Invalid KQL syntax and fallback failed: {validation_error}") from fallback_error
-                else:
-                    raise ValueError(f"Invalid KQL syntax and insufficient parameters for fallback: {validation_error}")
+        clean_query = kql_query.strip()
 
         # Check if query already contains cluster/database specification
         has_cluster_spec = "cluster(" in clean_query and "database(" in clean_query
@@ -887,7 +282,6 @@ def kql_execute_tool(kql_query: str, cluster_uri: Optional[str] = None, database
             cluster = cluster_uri
             db = database
 
-        # ENHANCED PARAMETER VALIDATION with informative errors
         if not cluster:
             raise ValueError("Cluster URI must be specified in query or parameters. Example: 'https://help.kusto.windows.net'")
 
@@ -898,15 +292,6 @@ def kql_execute_tool(kql_query: str, cluster_uri: Optional[str] = None, database
 
         if not db and not (is_mgmt_command and mgmt_needs_no_db):
             raise ValueError("Database must be specified in query or parameters. Example: 'Samples'")
-
-        # Final safety check for empty query before execution
-        if not clean_query or not clean_query.strip():
-            logger.error("Final query is empty after all processing")
-            raise ValueError("Query became empty after processing")
-
-        # Log the normalized query for debugging
-        if clean_query != original_query:
-            logger.debug("Query normalized from: %s... to: %s...", original_query[:100], clean_query[:100])
 
         # Use "master" database for management commands that don't require specific database
         db_for_execution = db if db else "master"
@@ -928,7 +313,7 @@ def kql_execute_tool(kql_query: str, cluster_uri: Optional[str] = None, database
 
 
 
-async def _post_execution_learning_bg(query: str, cluster: str, database: str, _df: pd.DataFrame):
+async def _post_execution_learning_bg(query: str, cluster: str, database: str, _df: pd.DataFrame, execution_time_ms: float = 0.0):
     """
     Enhanced background learning task with automatic schema discovery triggering.
     This runs asynchronously to avoid blocking query response.
@@ -951,12 +336,12 @@ async def _post_execution_learning_bg(query: str, cluster: str, database: str, _
                 else:
                     # Even without table extraction, store successful query globally
                     logger.debug("No tables extracted but storing successful query globally")
-                    from .memory import get_memory_manager
+                
                     memory_manager = get_memory_manager()
                     description = generate_query_description(query)
                     try:
                         # Store in global successful queries without table association
-                        memory_manager.add_global_successful_query(cluster, database, query, description)
+                        memory_manager.add_global_successful_query(cluster, database, query, description, execution_time_ms)
                         logger.debug("Stored global successful query: %s", description)
                     except (ValueError, TypeError, AttributeError) as e:
                         logger.debug("Failed to store global successful query: %s", e)
@@ -966,14 +351,14 @@ async def _post_execution_learning_bg(query: str, cluster: str, database: str, _
                 return
 
         # Store successful query for each table involved
-        from .memory import get_memory_manager
+    
         memory_manager = get_memory_manager()
         description = generate_query_description(query)
 
         for table in tables:
             try:
                 # Add successful query to table-specific memory
-                memory_manager.add_successful_query(cluster, database, table, query, description)
+                memory_manager.add_successful_query(cluster, database, query, description, execution_time_ms)
                 logger.debug("Stored successful query for %s: %s", table, description)
             except (ValueError, TypeError, AttributeError) as e:
                 logger.debug("Failed to store successful query for %s: %s", table, e)
@@ -990,7 +375,7 @@ async def _ensure_schema_discovered(cluster_uri: str, database: str, tables: Lis
     Force schema discovery if not in memory.
     This is the implementation recommended in the analysis.
     """
-    from .memory import get_memory_manager
+
     from .utils import SchemaManager
 
     memory = get_memory_manager()
@@ -998,18 +383,23 @@ async def _ensure_schema_discovered(cluster_uri: str, database: str, tables: Lis
 
     for table in tables:
         try:
-            # Check if schema exists in memory
-            schema = memory.get_schema(cluster_uri, database, table, enable_fallback=False)
+            # Get schema from database using internal method that returns list of schemas
+            schemas = memory._get_database_schema(cluster_uri, database)
+
+            # Find the schema for this specific table
+            schema = next((s for s in schemas if s.get("table") == table), None)
 
             if not schema or not schema.get("columns"):
                 # Trigger live discovery with force refresh
                 logger.info("Auto-triggering schema discovery for %s.%s", database, table)
-                discovered_schema = await schema_manager.get_table_schema(
-                    cluster_uri, database, table, _force_refresh=True
+                discovered_schema = await schema_manager.get_table_schema(  # pylint: disable=too-many-function-args
+                    cluster=cluster_uri, database=database, table=table, _force_refresh=True
                 )
 
                 if discovered_schema and discovered_schema.get("columns"):
                     logger.info("Successfully auto-discovered schema for %s with %d columns", table, len(discovered_schema['columns']))
+                elif discovered_schema and discovered_schema.get("is_not_found"):
+                    logger.info("Schema discovery skipped for '%s' (likely a local variable or function)", table)
                 else:
                     logger.warning("Auto-discovery failed for %s - no columns found", table)
             else:
@@ -1022,8 +412,7 @@ async def _ensure_schema_discovered(cluster_uri: str, database: str, tables: Lis
 def get_knowledge_corpus():
     """Backward-compatible wrapper to memory.get_knowledge_corpus"""
     try:
-        from .memory import get_knowledge_corpus as _mem_get_knowledge_corpus
-        return _mem_get_knowledge_corpus()
+        return get_memory_manager()
     except (ImportError, AttributeError, ValueError):
         # Fallback mock for tests if import fails
         class MockCorpus:
@@ -1044,13 +433,14 @@ async def execute_kql_query(
     database: Optional[str] = None,
     visualize: bool = False,
     use_schema_context: bool = True,
-    timeout: int = 300
-) -> Any:
+    timeout: int = 300,
+    use_cache: bool = True
+) -> Any: # pylint: disable=too-many-arguments
     """
     Legacy compatibility function for __init__.py import.
 
     Returns a list of dictionaries (test compatibility) or dictionary with success/error status.
-    Enhanced with background learning integration.
+    Enhanced with background learning integration and caching.
 
     Args:
         query: KQL query to execute
@@ -1058,8 +448,20 @@ async def execute_kql_query(
         database: Database name (optional)
         visualize: Whether to include visualization (ignored for now)
         use_schema_context: Whether to use schema context (ignored for now)
+        use_cache: Whether to use query result caching (default: True)
     """
     try:
+        # Check cache first
+        if use_cache:
+            try:
+                memory = get_memory_manager()
+                cached_json = memory.get_cached_result(query)
+                if cached_json:
+                    logger.info("Returning cached result for query")
+                    return json.loads(cached_json)
+            except (ImportError, AttributeError, ValueError, json.JSONDecodeError) as e:
+                logger.debug("Cache lookup failed: %s", e)
+
         # Optionally load schema context prior to execution (tests may patch get_knowledge_corpus)
         if use_schema_context:
             try:
@@ -1094,7 +496,24 @@ async def execute_kql_query(
                 for _, row in df.iterrows():
                     record = {}
                     for col, value in row.items():
-                        if pd.isna(value):
+                        # Handle complex types (lists, dicts, arrays) first to avoid ambiguity
+                        if isinstance(value, (list, dict, tuple, np.ndarray)):
+                            if isinstance(value, np.ndarray):
+                                record[col] = value.tolist()
+                            else:
+                                record[col] = value
+                            continue
+
+                        # Safe check for null/NaN for scalar types
+                        is_null = False
+                        try:
+                            if pd.isna(value):
+                                is_null = True
+                        except (ValueError, TypeError):
+                            # Fallback for ambiguous cases
+                            is_null = False
+
+                        if is_null:
                             record[col] = None
                         elif hasattr(value, 'isoformat'):  # Timestamp objects
                             record[col] = value.isoformat()
@@ -1107,7 +526,7 @@ async def execute_kql_query(
                         else:
                             record[col] = value
                     records.append(record)
-            except (ValueError, TypeError, KeyError) as e:
+            except (ValueError, TypeError, KeyError, AttributeError) as e:
                 logger.warning("DataFrame serialization failed: %s", e)
                 # Fallback to string conversion
                 records = df.astype(str).to_dict("records")
@@ -1115,6 +534,16 @@ async def execute_kql_query(
             if visualize and records:
                 # Add simple visualization marker for tests
                 records.append({"visualization": "chart_data"})
+
+            # Cache the result
+            if use_cache and records:
+                try:
+
+                    memory = get_memory_manager()
+                    memory.cache_query_result(query, json.dumps(records), len(records))
+                except Exception as e:
+                    logger.debug("Failed to cache result: %s", e)
+
             return records
         else:
             return []
@@ -1177,7 +606,7 @@ async def extract_context_from_prompt(user_context: str) -> Dict:
 async def learn_from_data(result_data: Any, context: Dict):
     """Store learning results in memory for future use."""
     try:
-        from .memory import get_memory_manager
+
         memory = get_memory_manager()
 
         # Convert result to learnable format

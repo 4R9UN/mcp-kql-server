@@ -758,7 +758,6 @@ class DynamicSchemaAnalyzer:
     @staticmethod
     def _looks_like_timestamp(value: str) -> bool:
         """Dynamic timestamp detection."""
-        import re
         timestamp_patterns = [
             r'\d{4}-\d{2}-\d{2}',  # Date pattern
             r'\d{2}:\d{2}:\d{2}',  # Time pattern
@@ -769,7 +768,6 @@ class DynamicSchemaAnalyzer:
     @staticmethod
     def _looks_like_identifier(value: str) -> bool:
         """Dynamic identifier detection."""
-        import re
         id_patterns = [
             r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',  # UUID
             r'^[0-9a-f]{32}$',  # MD5 hash
@@ -984,7 +982,7 @@ CONNECTION_CONFIG = {
 ERROR_HANDLING_CONFIG = {
     "enable_graceful_degradation": True,
     "isolate_thread_errors": True,
-    "fallback_strategies": ["cached_schema", "query_derived_schema", "minimal_schema"],
+    "fallback_strategies": ["cached_schema", "query_derived_schema"],
     "error_recovery_timeout": 30.0,
     "max_consecutive_failures": 3,
     "failure_recovery_delay": 60.0,
@@ -1068,14 +1066,16 @@ def get_chaining_threshold(default: float = 0.5) -> float:
     """Return the chaining threshold used to decide whether to trigger chaining behavior."""
     try:
         return float(QUERY_CHAINING_CONFIG.get("chaining_threshold", default))
-    except Exception:
+    except (ValueError, TypeError):
         return default
 
 def is_chaining_feature_enabled(feature_name: str, config_section: str = "chaining") -> bool:
+    """Check if a chaining feature is enabled."""
     config = QUERY_CHAINING_CONFIG if config_section == "chaining" else {}
     return bool(config.get(feature_name, False))
 
 def should_trigger_background_schema_discovery(trigger_type: str) -> bool:
+    """Check if background schema discovery should be triggered."""
     if not is_chaining_feature_enabled("enable_background_schema_discovery"):
         return False
     trigger_conditions = BACKGROUND_SCHEMA_CONFIG.get("discovery_trigger_conditions", {})
@@ -1087,10 +1087,7 @@ QUESTION_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in QUESTION_PAT
 
 def is_performance_feature_enabled(feature_name: str) -> bool:
     """Return whether a performance-related feature is enabled (case-insensitive)."""
-    try:
-        return bool(PERFORMANCE_CONFIG.get(feature_name.upper(), False))
-    except Exception:
-        return False
+    return bool(PERFORMANCE_CONFIG.get(feature_name.upper(), False))
 
 # Default await timeout for async wrappers that run sync work in background threads
 DEFAULT_AWAIT_TIMEOUT = 30

@@ -1,14 +1,19 @@
+"""
+MCP Registry module for managing server registrations.
+"""
+
+import threading
+from typing import List, Optional
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
-import threading
 
 app = FastAPI()
 
 class Server:
     """Represents a server in the MCP Registry."""
-    def __init__(self, id: str, name: str, url: str, metadata: Optional[dict] = None):
-        self.id = id
+    def __init__(self, server_id: str, name: str, url: str, metadata: Optional[dict] = None):
+        self.id = server_id
         self.name = name
         self.url = url
         self.metadata = metadata
@@ -41,6 +46,7 @@ class MCPRegistry:
 registry = MCPRegistry()
 
 class ServerCreate(BaseModel):
+    """Schema for creating a new server registration."""
     id: str
     name: str
     url: str
@@ -48,15 +54,18 @@ class ServerCreate(BaseModel):
 
 @app.post("/registry/register")
 def register_server(server: ServerCreate):
+    """Register a new server."""
     new_server = Server(**server.dict())
     registry.register_server(new_server)
     return {"message": "Server registered successfully."}
 
 @app.delete("/registry/unregister/{server_id}")
 def unregister_server(server_id: str):
+    """Unregister a server."""
     registry.unregister_server(server_id)
     return {"message": "Server unregistered successfully."}
 
 @app.get("/registry/list", response_model=List[Server])
 def list_servers():
+    """List all registered servers."""
     return registry.list_servers()

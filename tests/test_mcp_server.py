@@ -22,19 +22,6 @@ class TestMCPServerFunctions(unittest.TestCase):
         self.test_database = TEST_CONFIG["mock_database"]
         self.test_table = TEST_CONFIG["mock_table"]
 
-    def test_query_processor_integration(self):
-        """Test that QueryProcessor is properly integrated."""
-        from mcp_kql_server.utils import QueryProcessor
-        from mcp_kql_server.memory import get_memory_manager
-
-        # Test that QueryProcessor can be instantiated
-        memory_manager = get_memory_manager()
-        processor = QueryProcessor(memory_manager)
-
-        # Test basic functionality
-        self.assertIsNotNone(processor)
-        self.assertIsNotNone(processor.memory_manager)
-
     def test_error_handler_enhancement(self):
         """Test enhanced ErrorHandler functionality."""
         from mcp_kql_server.utils import ErrorHandler
@@ -50,15 +37,6 @@ class TestMCPServerFunctions(unittest.TestCase):
         self.assertIn("recovery_actions", result)
         self.assertFalse(result["success"])
 
-    @patch('mcp_kql_server.mcp_server.kusto_manager_global', {'authenticated': True})
-    def test_natural_language_query_processing(self):
-        """Test natural language query processing logic."""
-        from mcp_kql_server.mcp_server import _generate_kql_from_natural_language
-
-        # This would normally be an async function, but we're testing the logic
-        # In a real test, you'd use asyncio.run() or similar
-        self.assertTrue(callable(_generate_kql_from_natural_language))
-
     def test_schema_manager_integration(self):
         """Test SchemaManager integration."""
         from mcp_kql_server.utils import SchemaManager
@@ -69,28 +47,6 @@ class TestMCPServerFunctions(unittest.TestCase):
 
         self.assertIsNotNone(schema_manager)
         self.assertIsNotNone(schema_manager.memory_manager)
-
-    def test_query_validation_logic(self):
-        """Test query validation and preprocessing."""
-        from mcp_kql_server.utils import QueryProcessor
-        from mcp_kql_server.memory import get_memory_manager
-
-        processor = QueryProcessor(get_memory_manager())
-
-        # Test query cleaning
-        dirty_query = "  // Comment\n  MyTable | take 10  "
-        clean_query = processor.clean(dirty_query)
-
-        self.assertIsInstance(clean_query, str)
-        self.assertNotIn("//", clean_query)
-
-        # Test query parsing
-        test_query = "MyTable | take 10 | project Column1, Column2"
-        parsed = processor.parse(test_query)
-
-        self.assertIsInstance(parsed, dict)
-        self.assertIn("tables", parsed)
-        self.assertIn("operations", parsed)
 
     def test_bracket_if_needed_function(self):
         """Test the bracket_if_needed utility function."""
@@ -153,6 +109,45 @@ class TestMCPServerFunctions(unittest.TestCase):
         self.assertTrue(hasattr(manager, 'get_memory_stats'))
         # Note: clear_schema_cache is available via SchemaManager, not directly on memory manager
         self.assertTrue(hasattr(manager, 'corpus') or hasattr(manager, 'memory_path'))
+
+
+    @patch("mcp_kql_server.mcp_server.kql_execute_tool")
+    @patch("mcp_kql_server.mcp_server.schema_manager")
+    @patch("mcp_kql_server.mcp_server.kusto_manager_global", {"authenticated": True})
+    def test_execute_kql_query_schema_context_on_error(self, mock_schema_manager, mock_execute_tool):
+        """Test that schema context is added to suggestions on SEM0100 error."""
+        from mcp_kql_server.mcp_server import _execute_kql_query_logic
+        import asyncio
+
+        # Mock execution to raise SEM0100 error
+        mock_execute_tool.side_effect = Exception("Request is invalid and cannot be processed: Semantic error: SEM0100: 'project' operator: Failed to resolve scalar expression named 'InvalidCol'")
+
+        # Mock schema manager to return schema
+        async def mock_get_schema(*args, **kwargs):
+            return {
+                "columns": {"ValidCol1": "string", "ValidCol2": "int"},
+                "last_updated": "2023-01-01"
+            }
+        mock_schema_manager.get_table_schema.side_effect = mock_get_schema
+
+        # Execute query
+        result_json = asyncio.run(_execute_kql_query_logic(
+            query="MyTable | project InvalidCol",
+            cluster_url="https://test.kusto.windows.net",
+            database="TestDB"
+        ))
+        
+        result = json.loads(result_json)
+
+        # Verify results
+        self.assertFalse(result["success"])
+        self.assertIn("suggestions", result)
+        
+        # Check if schema context is in suggestions
+        suggestions_str = str(result["suggestions"])
+        self.assertIn("Schema Context for referenced tables", suggestions_str)
+        self.assertIn("ValidCol1", suggestions_str)
+        self.assertIn("ValidCol2", suggestions_str)
 
 
 if __name__ == "__main__":

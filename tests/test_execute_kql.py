@@ -13,11 +13,9 @@ from azure.kusto.data.exceptions import KustoServiceError
 
 from mcp_kql_server.constants import TEST_CONFIG
 from mcp_kql_server.execute_kql import (
-    clean_query_for_execution,
     execute_kql_query,
     extract_cluster_and_database_from_query,
     extract_tables_from_query,
-    validate_kql_query_syntax,
     validate_query,
 )
 
@@ -358,79 +356,6 @@ class TestExecuteKQL(unittest.TestCase):
         query = "cluster('test.cluster').database('testdb').TestTable | where col1 == 'value'"
         tables = extract_tables_from_query(query)
         self.assertIn("TestTable", tables)
-
-    def test_validate_kql_query_syntax_valid(self):
-        """Test KQL syntax validation for valid query."""
-        query = "TestTable | take 10"
-        is_valid, error = validate_kql_query_syntax(query)
-        self.assertTrue(is_valid)
-        self.assertEqual(error, "")
-
-    def test_validate_kql_query_syntax_invalid(self):
-        """Test KQL syntax validation for invalid query."""
-        query = ""
-        is_valid, error = validate_kql_query_syntax(query)
-        self.assertFalse(is_valid)
-        self.assertIn("empty", error.lower())
-
-    def test_clean_query_for_execution(self):
-        """Test query cleaning functionality."""
-        query = "  TestTable | take 10  "
-        cleaned = clean_query_for_execution(query)
-        self.assertEqual(cleaned, "TestTable | take 10")
-
-    def test_validate_kql_operator_syntax_invalid_space_in_negation(self):
-        """Test KQL validation catches invalid negation operators with spaces."""
-        # Test various invalid operators with spaces
-        invalid_queries = [
-            "TestTable | where Status ! = 'Active'",  # Space between ! and =
-            "TestTable | where Name ! contains 'test'",  # Space between ! and contains
-            "TestTable | where Category ! in ('A', 'B')",  # Space between ! and in
-            "TestTable | where Title ! has 'error'",  # Space between ! and has
-        ]
-        
-        for query in invalid_queries:
-            is_valid, error = validate_kql_query_syntax(query)
-            self.assertFalse(is_valid, f"Query should be invalid: {query}")
-            self.assertIn("!", error, f"Error message should mention the invalid operator for: {query}")
-            self.assertIn("space", error.lower(), f"Error message should mention space issue for: {query}")
-
-    def test_validate_kql_operator_syntax_invalid_has_any_negation(self):
-        """Test KQL validation catches invalid !has_any operator."""
-        invalid_query = "TestTable | where RuleName !has_any ('Rule1', 'Rule2', 'Rule3')"
-        is_valid, error = validate_kql_query_syntax(invalid_query)
-        self.assertFalse(is_valid)
-        self.assertIn("!has_any", error)
-        self.assertIn("!in", error, "Error should suggest using !in instead")
-
-    def test_validate_kql_operator_syntax_valid_negation(self):
-        """Test KQL validation allows valid negation operators without spaces."""
-        valid_queries = [
-            "TestTable | where Status != 'Active'",  # Correct: no space
-            "TestTable | where Name !contains 'test'",  # Correct: no space
-            "TestTable | where Category !in ('A', 'B', 'C')",  # Correct: no space
-            "TestTable | where Title !has 'error'",  # Correct: no space
-            "TestTable | where Path !startswith '/temp'",  # Correct: no space
-            "TestTable | where not (Status == 'Active')",  # Alternative: using 'not' keyword
-        ]
-        
-        for query in valid_queries:
-            is_valid, error = validate_kql_query_syntax(query)
-            self.assertTrue(is_valid, f"Query should be valid: {query}. Error: {error}")
-            self.assertEqual(error, "", f"Should have no error for valid query: {query}")
-
-    def test_validate_kql_operator_list_membership(self):
-        """Test KQL validation for list membership operators."""
-        # Valid list operations
-        valid_queries = [
-            "TestTable | where RuleName in ('Rule1', 'Rule2')",  # Valid: in
-            "TestTable | where RuleName !in ('Rule1', 'Rule2')",  # Valid: !in (no space)
-            "TestTable | where Category has_any ('cat1', 'cat2')",  # Valid: has_any (for arrays)
-        ]
-        
-        for query in valid_queries:
-            is_valid, error = validate_kql_query_syntax(query)
-            self.assertTrue(is_valid, f"Query should be valid: {query}. Error: {error}")
 
 
 if __name__ == "__main__":
