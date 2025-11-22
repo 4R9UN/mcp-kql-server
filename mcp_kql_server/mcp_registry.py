@@ -5,8 +5,23 @@ MCP Registry module for managing server registrations.
 import threading
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+try:
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+    # Dummy classes to prevent NameError if module is imported but not used
+    class FastAPI:
+        def post(self, *args, **kwargs): return lambda x: x
+        def delete(self, *args, **kwargs): return lambda x: x
+        def get(self, *args, **kwargs): return lambda x: x
+    
+    class HTTPException(Exception):
+        def __init__(self, status_code, detail): super().__init__(detail)
+        
+    class BaseModel:
+        def dict(self): return {}
 
 app = FastAPI()
 

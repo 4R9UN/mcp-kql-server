@@ -191,7 +191,7 @@ class KQLValidator:
         Returns:
             (errors, warnings, validated_count)
         """
-        errors = []
+        errors: List[str] = []
         warnings = []
         validated_count = 0
 

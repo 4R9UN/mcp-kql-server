@@ -1,24 +1,24 @@
 import asyncio
-import json
+# import json - removed unused import
 import logging
 import os
 import sys
 from unittest.mock import MagicMock, AsyncMock
+from fastmcp import Context
 
 # Add current directory to path
 sys.path.insert(0, os.getcwd())
 
-from mcp_kql_server.memory import MemoryManager
-import mcp_kql_server.memory
+from mcp_kql_server.memory import MemoryManager # noqa: E402
+import mcp_kql_server.memory # noqa: E402
 print(f"DEBUG: Loaded memory from {mcp_kql_server.memory.__file__}")
 print(f"DEBUG: MemoryManager methods: {[m for m in dir(MemoryManager) if 'schema' in m]}")
-from mcp_kql_server.mcp_server import (
+from mcp_kql_server.mcp_server import ( # noqa: E402
     _schema_refresh_operation,
     _schema_discover_operation,
-    logging_middleware,
+    # logging_middleware, - removed unused import
     schema_manager
 )
-from fastmcp import Context
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)

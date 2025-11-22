@@ -20,9 +20,8 @@ import numpy as np
 from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
 from azure.kusto.data.exceptions import KustoServiceError
 
-from .constants import (
-    DEFAULT_CONNECTION_TIMEOUT
-)
+# Constants import
+from .constants import DEFAULT_QUERY_TIMEOUT
 from .memory import get_memory_manager
 from .utils import (
     extract_cluster_and_database_from_query,
@@ -107,10 +106,20 @@ def _normalize_cluster_uri(cluster_uri: str) -> str:
     return cluster_uri.rstrip("/")
 
 
+# Client cache for pooling
+_client_cache = {}
+
 def _get_kusto_client(cluster_url: str) -> KustoClient:
-    """Create and authenticate a Kusto client."""
-    kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
-    return KustoClient(kcsb)
+    """Create and authenticate a Kusto client with pooling."""
+    # Normalize URL for consistent caching
+    normalized_url = _normalize_cluster_uri(cluster_url)
+    
+    if normalized_url not in _client_cache:
+        logger.info("Creating new Kusto client for %s", normalized_url)
+        kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(normalized_url)
+        _client_cache[normalized_url] = KustoClient(kcsb)
+    
+    return _client_cache[normalized_url]
 
 def _parse_kusto_response(response) -> pd.DataFrame:
     """Parse a Kusto response into a pandas DataFrame."""
@@ -141,7 +150,7 @@ def _parse_kusto_response(response) -> pd.DataFrame:
     return df
 
 @retry_on_exception()
-def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _timeout: int = 300) -> pd.DataFrame:
+def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _timeout: int = DEFAULT_QUERY_TIMEOUT) -> pd.DataFrame:
     """
     Core synchronous function to execute a KQL query against a Kusto cluster.
     Adds configurable request timeout and uses retry decorator for transient failures.
@@ -193,11 +202,11 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _time
             raise
 
     finally:
-        if client:
-            client.close()
+        # Do not close the client as it is now pooled/cached
+        pass
 
 
-def execute_large_query(query: str, cluster: str, database: str, _chunk_size: int = 1000, timeout: int = 300) -> pd.DataFrame:
+def execute_large_query(query: str, cluster: str, database: str, _chunk_size: int = 1000, timeout: int = DEFAULT_QUERY_TIMEOUT) -> pd.DataFrame:
     """
     Minimal query chunking helper.
     - If the query already contains explicit 'take' or 'limit', execute as-is.

@@ -1,8 +1,8 @@
 import asyncio
-import json
+# import json - removed unused import
 import os
 import sys
-from datetime import datetime
+# from datetime import datetime - removed unused import
 
 # Add parent dir to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,7 +45,7 @@ async def test_memory_updates():
     if os.path.exists(db_path):
         try:
             os.remove(db_path)
-        except:
+        except OSError:
             pass
 
 async def main():

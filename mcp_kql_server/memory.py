@@ -49,21 +49,27 @@ TOON_TYPE_MAP = {
 class SemanticSearch:
     """Handles embedding generation and similarity search."""
     def __init__(self, model_name='all-MiniLM-L6-v2'):
+        self.model_name = model_name
         self.model = None
-        if HAS_SENTENCE_TRANSFORMERS:
+        # Do not load model at startup
+        
+    def _load_model(self):
+        """Lazy load the model on first use."""
+        if self.model is None and HAS_SENTENCE_TRANSFORMERS:
             try:
                 # Suppress verbose output from sentence-transformers
                 logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
                 if SentenceTransformer:
-                    self.model = SentenceTransformer(model_name)
-                logger.info("Loaded Semantic Search model: %s", model_name)
+                    self.model = SentenceTransformer(self.model_name)
+                logger.info("Loaded Semantic Search model: %s", self.model_name)
             except Exception as e:
                 logger.warning("Failed to load SentenceTransformer: %s", e)
-        else:
-            logger.warning("sentence-transformers not installed. Semantic search disabled.")
 
     def encode(self, text: str) -> Optional[bytes]:
         """Generate embedding for text and return as bytes."""
+        # Lazy load model if needed
+        self._load_model()
+        
         if self.model is None:
             return None
         try:
@@ -285,7 +291,7 @@ class MemoryManager:
         if query_embedding is None:
             return []
 
-        query_vec = np.frombuffer(query_embedding, dtype=np.float32)
+        query_vector = np.frombuffer(query_embedding, dtype=np.float32)
         results = []
 
         with self._lock, sqlite3.connect(self.db_path) as conn:
@@ -297,10 +303,10 @@ class MemoryManager:
             for row in cursor:
                 if row[2]: # If embedding exists
                     tbl_vec = np.frombuffer(row[2], dtype=np.float32)
-                    norm_q = np.linalg.norm(query_vec)
+                    norm_q = np.linalg.norm(query_vector)
                     norm_t = np.linalg.norm(tbl_vec)
                     if norm_q > 0 and norm_t > 0:
-                        similarity = np.dot(query_vec, tbl_vec) / (norm_q * norm_t)
+                        similarity = np.dot(query_vector, tbl_vec) / (norm_q * norm_t)
                         results.append({
                             "table": row[0],
                             "columns": json.loads(row[1]),
@@ -310,14 +316,15 @@ class MemoryManager:
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:limit]
 
-    def _find_similar_queries(self, cluster: str, database: str,
-                              query: str, limit: int = 3) -> List[Dict[str, Any]]:
+    def find_similar_queries(self, cluster: str, database: str,
+                               query: str, limit: int = 3) -> List[Dict[str, Any]]:
         """Find similar past queries using vector search."""
         query_embedding = self.semantic_search.encode(query)
         if query_embedding is None:
             return []
 
-        query_vec = np.frombuffer(query_embedding, dtype=np.float32)
+        # Rename to query_vector to avoid potential linter confusion with previous name
+        query_vector = np.frombuffer(query_embedding, dtype=np.float32)
         results = []
 
         with self._lock, sqlite3.connect(self.db_path) as conn:
@@ -328,11 +335,11 @@ class MemoryManager:
 
             for row in cursor:
                 if row[2]:
-                    q_vec = np.frombuffer(row[2], dtype=np.float32)
-                    norm_q1 = np.linalg.norm(query_vec)
-                    norm_q2 = np.linalg.norm(q_vec)
+                    row_vector = np.frombuffer(row[2], dtype=np.float32)
+                    norm_q1 = np.linalg.norm(query_vector)
+                    norm_q2 = np.linalg.norm(row_vector)
                     if norm_q1 > 0 and norm_q2 > 0:
-                        similarity = np.dot(query_vec, q_vec) / (norm_q1 * norm_q2)
+                        similarity = np.dot(query_vector, row_vector) / (norm_q1 * norm_q2)
                         results.append({
                             "query": row[0],
                             "description": row[1],
@@ -413,7 +420,7 @@ class MemoryManager:
             return schemas
 
     def get_relevant_context(self, cluster: str, database: str,
-                             user_query: str, max_tokens: int = 4000) -> str:
+                             user_query: str) -> str:
         """
         CAG Core: Retrieve full schema and relevant past queries, formatted as TOON.
         """
@@ -422,7 +429,7 @@ class MemoryManager:
         table_names = [s["table"] for s in schemas]
 
         # 2. Get similar queries (Few-Shot RAG)
-        similar_queries = self._find_similar_queries(cluster, database, user_query)
+        similar_queries = self.find_similar_queries(cluster, database, user_query)
 
         # 3. Get Join Hints
         join_hints = self.get_join_hints(table_names)

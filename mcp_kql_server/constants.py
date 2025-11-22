@@ -828,14 +828,19 @@ class DynamicSchemaAnalyzer:
 
         # Generate optimization hints
         if characteristics["has_temporal_data"]:
+            characteristics["optimization_hints"] = []
             characteristics["optimization_hints"].append(
                 "Consider time-based filtering for better performance"
             )
         if characteristics["has_identifiers"]:
+            if "optimization_hints" not in characteristics:
+                characteristics["optimization_hints"] = []
             characteristics["optimization_hints"].append(
                 "Identifiers present - suitable for joins"
             )
         if characteristics["has_metrics"]:
+            if "optimization_hints" not in characteristics:
+                characteristics["optimization_hints"] = []
             characteristics["optimization_hints"].append(
                 "Numeric metrics available - consider aggregations"
             )
@@ -890,7 +895,7 @@ class DynamicColumnAnalyzer:
     @staticmethod
     def _analyze_sample_values(sample_values: List[str]) -> List[str]:
         """Analyze sample values to determine column characteristics."""
-        tags = []
+        tags: List[str] = []
 
         if not sample_values:
             return tags
@@ -1079,7 +1084,9 @@ def should_trigger_background_schema_discovery(trigger_type: str) -> bool:
     if not is_chaining_feature_enabled("enable_background_schema_discovery"):
         return False
     trigger_conditions = BACKGROUND_SCHEMA_CONFIG.get("discovery_trigger_conditions", {})
-    return trigger_conditions.get(trigger_type, False)
+    if isinstance(trigger_conditions, dict):
+        return trigger_conditions.get(trigger_type, False)
+    return False
 
 # Precompiled regex sets for reuse across modules (reduce repeated compilation)
 KQL_SYNTAX_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in KQL_SYNTAX_PATTERNS]

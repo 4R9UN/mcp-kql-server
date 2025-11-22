@@ -19,6 +19,7 @@ Functions implemented here:
  - generate_query_description
 """
 import asyncio
+import difflib
 import json
 import logging
 import os
@@ -279,6 +280,8 @@ class SchemaManager:
         self._discovery_cache = {}
         self._last_discovery_times = {}
         self._usage_tracking = []
+        # Multi-cluster support: table_name -> [(cluster, database)]
+        self._table_locations = {}
 
     async def _execute_kusto_async(self, query: str, cluster: str, database: str, is_mgmt: bool = False) -> List[Dict]:
         """
@@ -763,6 +766,9 @@ class SchemaManager:
         # Store the freshly discovered schema
         self.memory_manager.store_schema(cluster, database, table, schema_obj)
         logger.info("Successfully discovered and stored enhanced schema for %s.%s with %s columns using %s", database, table, len(columns), method)
+
+        # Register table location for multi-cluster support
+        self.register_table_location(table, cluster, database)
 
         # Track successful usage
         self.track_schema_usage(table, method, True)
@@ -1350,6 +1356,37 @@ class SchemaManager:
         except Exception as e:
             logger.debug("Schema usage tracking failed: %s", e)
 
+    def find_closest_match(self, name: str, candidates: List[str], cutoff: float = 0.6) -> Optional[str]:
+        """Find the closest match for a name from a list of candidates."""
+        matches = difflib.get_close_matches(name, candidates, n=1, cutoff=cutoff)
+        return matches[0] if matches else None
+
+    def register_table_location(self, table_name: str, cluster: str, database: str):
+        """
+        Register a table's location (cluster/database).
+        Supports tracking tables that exist in multiple clusters.
+        """
+        if table_name not in self._table_locations:
+            self._table_locations[table_name] = []
+        
+        location = (cluster, database)
+        if location not in self._table_locations[table_name]:
+            self._table_locations[table_name].append(location)
+            logger.debug("Registered table '%s' at %s/%s", table_name, cluster, database)
+
+    def get_table_locations(self, table_name: str) -> List[Tuple[str, str]]:
+        """
+        Get all known locations (cluster, database) for a table.
+        Returns empty list if table is not registered.
+        """
+        return self._table_locations.get(table_name, [])
+
+    def is_multi_cluster_table(self, table_name: str) -> bool:
+        """
+        Check if a table exists in multiple clusters.
+        """
+        return len(self.get_table_locations(table_name)) > 1
+
 # Consolidated Schema Discovery Interface
 class SchemaDiscovery(SchemaManager):
     """
@@ -1549,35 +1586,8 @@ class ErrorHandler:
             return {
                 "success": False,
                 "error": str(e),
-                "suggestions": ["An unexpected error occurred. Check server logs."],
-                "recovery_actions": ["Check logs", "Verify configuration", "Retry operation"],
-                "error_type": "execution_error",
-                "confidence": 0.0,
-                "kusto_specific": False
-            }
-
-        error_str = str(e).lower()
-
-        # Comprehensive Kusto-specific error patterns with detailed coverage
-        error_patterns = {
-            # Column/Schema Errors (SEM0100 series)
-            "column_resolution": {
-                "patterns": ["sem0100", "failed to resolve", "column", "doesn't exist", "not found",
-                           "unknown column", "invalid column name", "column name not found", "no such column"],
-                "error_code": "SEM0100",
-                "category": "Schema Error",
-                "suggestions": [
-                    "Check column/table names for typos and correct case.",
-                    "Use schema_memory(operation='discover') to refresh the schema.",
-                    "Verify that the column exists in the target table.",
-                    "Consider using execute_kql_query with generate_query=True for schema validation."
-                ],
-                "recovery_actions": ["Check table schema", "Verify column spelling", "Use show schema command", "Refresh schema cache"]
-            },
-            # ... (Other error patterns omitted for brevity but would be included in full implementation)
-        }
-
-        # Simplified error handling for brevity in this rewrite
+                "suggestions": ["An unexpected error occurred. Check server logs."]
+            }        # Simplified error handling for brevity in this rewrite
         return {
             "success": False,
             "error": str(e),

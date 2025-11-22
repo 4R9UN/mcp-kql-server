@@ -77,15 +77,15 @@ def trigger_az_cli_auth():
             [az_command, "config", "set", "core.login_experience_v2=off"],
             env=env, capture_output=True, text=True, check=True
         )
-        result = subprocess.run(
+        auth_result = subprocess.run(
             [az_command, "login", "--use-device-code"],
             capture_output=True, text=True, env=env, timeout=120, check=False
         )
-        if result.returncode == 0:
+        if auth_result.returncode == 0:
             logger.info("Azure CLI login successful.")
             return {"authenticated": True, "message": "Azure CLI login successful."}
-        logger.error("Azure CLI login failed: %s", result.stderr)
-        return {"authenticated": False, "message": result.stderr}
+        logger.error("Azure CLI login failed: %s", auth_result.stderr)
+        return {"authenticated": False, "message": auth_result.stderr}
     except subprocess.TimeoutExpired:
         logger.error("Authentication timed out.")
         return {"authenticated": False, "message": "Authentication timed out. Please try again."}

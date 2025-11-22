@@ -1,7 +1,7 @@
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 import json
-import asyncio
+# import asyncio - removed unused import
 from mcp_kql_server.memory import MemoryManager
 from mcp_kql_server.mcp_server import _schema_find_tables_operation
 

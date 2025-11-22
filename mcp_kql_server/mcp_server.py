@@ -33,11 +33,6 @@ from .utils import (
 )
 from .kql_auth import authenticate_kusto
 from .kql_validator import KQLValidator
-from .ai_prompts import (
-    KQL_SYSTEM_PROMPT,
-    build_generation_prompt,
-    extract_kql_from_response
-)
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +137,7 @@ async def execute_kql_query(
         )
 
         if not validation_result["valid"]:
-            logger.warning(f"Query validation failed: {validation_result['errors']}")
+            logger.warning("Query validation failed: %s", validation_result['errors'])
             result = {
                 "success": False,
                 "error": "Query validation failed",
@@ -155,7 +150,7 @@ async def execute_kql_query(
             }
             return json.dumps(result, indent=2)
 
-        logger.info(f"Query validated successfully. Tables: {validation_result['tables_used']}, Columns: {validation_result['columns_validated']}")
+        logger.info("Query validated successfully. Tables: %s, Columns: %s", validation_result['tables_used'], validation_result['columns_validated'])
 
         # Execute query with proper exception handling
         try:
@@ -243,6 +238,37 @@ async def execute_kql_query(
     except (OSError, RuntimeError, ValueError, KeyError) as e:
         # Use the enhanced ErrorHandler for consistent Kusto error handling
         error_result = ErrorHandler.handle_kusto_error(e)
+        
+        # Smart Error Recovery: Add fuzzy match suggestions
+        error_msg = str(e).lower()
+        if "name doesn't exist" in error_msg or "semantic error" in error_msg:
+            # Extract potential invalid name
+            match = re.search(r"'([^']*)'", str(e))
+            if match:
+                invalid_name = match.group(1)
+                suggestions = []
+                
+                # Try to find in known tables from validation context
+                # We use the validation_result from the outer scope if available
+                try:
+                    if 'validation_result' in locals() and validation_result.get('tables_used'):
+                        for table in validation_result['tables_used']:
+                            # We need cluster/database context. 
+                            # For now, use the ones passed to the function
+                            schema = await schema_manager.get_table_schema(cluster_url, database, table)
+                            if schema and schema.get('columns'):
+                                candidates = list(schema['columns'].keys())
+                                best_match = schema_manager.find_closest_match(invalid_name, candidates)
+                                if best_match:
+                                    suggestions.append(f"Did you mean column '{best_match}' in table '{table}'?")
+                except Exception as suggest_err:
+                    logger.debug("Failed to generate suggestions: %s", suggest_err)
+                
+                if suggestions:
+                    if "suggestions" not in error_result:
+                        error_result["suggestions"] = []
+                    error_result["suggestions"].extend(suggestions)
+
         return ErrorHandler.safe_json_dumps(error_result, indent=2)
 
 async def _generate_kql_from_natural_language(
@@ -273,6 +299,13 @@ async def _generate_kql_from_natural_language(
         if not schema_info or not schema_info.get("columns"):
             return {"success": False, "error": f"Failed to retrieve a valid schema for table '{target_table}'.", "query": ""}
 
+        # 2.5 Check for multi-cluster tables
+        table_locations = schema_manager.get_table_locations(target_table)
+        if len(table_locations) > 1:
+            logger.info("Multi-cluster table detected: '%s' exists in %d locations", target_table, len(table_locations))
+            for loc_cluster, loc_database in table_locations:
+                logger.debug("  - %s/%s", loc_cluster, loc_database)
+
         actual_columns = schema_info["columns"].keys()
         # Create a case-insensitive map for matching
         actual_columns_lower = {col.lower(): col for col in actual_columns}
@@ -293,12 +326,21 @@ async def _generate_kql_from_natural_language(
             # Fallback to a simple 'take 10' but warn the user.
             final_query = f"{bracket_if_needed(target_table)} | take 10"
             generation_method = "safe_fallback_no_columns_found"
-            logger.warning(f"No valid columns found in query for table '{target_table}'. Defaulting to 'take 10'.")
+            logger.warning("No valid columns found in query for table '%s'. Defaulting to 'take 10'.", target_table)
         else:
             # Build a project query with only valid columns
             project_clause = ", ".join([bracket_if_needed(c) for c in valid_columns])
             final_query = f"{bracket_if_needed(target_table)} | project {project_clause} | take 10"
             generation_method = "schema_validated_generation"
+
+        # 6. Fetch similar queries for dynamic few-shot prompting
+        similar_queries = []
+        try:
+            similar_queries = memory_manager.find_similar_queries(cluster_url, database, natural_language_query)
+            if similar_queries:
+                logger.info("Found %d similar queries for context", len(similar_queries))
+        except Exception as e:
+            logger.warning("Failed to fetch similar queries: %s", e)
 
         return {
             "success": True,
@@ -872,9 +914,9 @@ def main():
         kusto_manager_global = authenticate_kusto()
 
         if kusto_manager_global["authenticated"]:
-            logger.info("ðŸš€ MCP KQL Server ready - authenticated and initialized")
+            logger.info("🚀 MCP KQL Server ready - authenticated and initialized")
         else:
-            logger.warning("ðŸš€ MCP KQL Server starting - authentication failed, some operations may not work")
+            logger.warning("🚀 MCP KQL Server starting - authentication failed, some operations may not work")
 
         # Log available tools
         logger.info("Available tools: execute_kql_query (with query generation), schema_memory (comprehensive schema operations)")

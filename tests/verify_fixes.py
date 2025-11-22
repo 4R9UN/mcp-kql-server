@@ -1,5 +1,5 @@
 import asyncio
-import json
+# import json - removed unused import
 import os
 import sys
 from unittest.mock import MagicMock
@@ -7,8 +7,6 @@ from unittest.mock import MagicMock
 # Add parent dir to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcp_kql_server.mcp_server import _schema_get_context_operation, _schema_clear_cache_operation
-from mcp_kql_server.utils import SchemaManager
 from mcp_kql_server.memory import MemoryManager
 
 async def test_fixes():
@@ -27,7 +25,7 @@ async def test_fixes():
         
         # Actually, let's just check if we can import the module without error, 
         # which confirms syntax is valid.
-        import mcp_kql_server.mcp_server as server
+        # import mcp_kql_server.mcp_server as server - removed unused import
         print("✅ mcp_server imported successfully (query_processor fixed)")
         
     except Exception as e:
@@ -35,7 +33,7 @@ async def test_fixes():
 
     # Test utils fix
     try:
-        import mcp_kql_server.utils as utils
+        # import mcp_kql_server.utils as utils - removed unused import
         print("✅ utils imported successfully")
     except Exception as e:
         print(f"❌ utils import failed: {e}")

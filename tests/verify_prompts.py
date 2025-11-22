@@ -4,7 +4,7 @@ import os
 # Add parent dir to path AND insert at 0 to prioritize local code
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcp_kql_server.ai_prompts import build_generation_prompt, MERMAID_VISUALIZATION_PROMPT
+from mcp_kql_server.ai_prompts import build_generation_prompt
 
 def test_prompt_enhancements():
     print("Testing prompt enhancements...")
