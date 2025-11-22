@@ -28,6 +28,20 @@ This release brings significant improvements to the server's intelligence and pe
 - **💧 Watermark**: Added watermark to generated reports for better traceability and provenance.
 - **🎨 Premium Visualizations**: Enhanced Mermaid visualization with a new "Cyberpunk/Neon" color palette for stunning, high-contrast diagrams.
 
+#### **4. Production & Deployment**
+- **🚀 Production Deployment Guide**: Comprehensive guide for deploying to Azure Container Apps with enterprise-grade security
+  - 📖 Full documentation available in [`deployment/README.md`](deployment/README.md)
+  - ⚡ One-command deployment scripts (PowerShell & Bash)
+  - 🏗️ Infrastructure as Code with Bicep templates
+  - 🔒 Managed Identity for passwordless authentication
+  - 📊 Integrated monitoring with Log Analytics
+- **🐳 Docker Containerization**: Multi-stage Dockerfile optimized for production
+  - ✅ Lightweight Python 3.11 slim base image
+  - ✅ Security best practices with non-root user
+  - ✅ Optimized layer caching for faster builds
+  - ✅ Health checks and proper signal handling
+  - 📦 Ready for Azure Container Registry deployment
+
 ### 🐛 **Bug Fixes**
 - **Critical Fix**: Resolved unbound variable error in `execute_kql.py`.
 - **Validation**: Fixed `SEM0100` errors with stricter column validation.
