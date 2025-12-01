@@ -7,6 +7,28 @@ This directory contains all necessary artifacts to deploy the MCP KQL Server to 
 The solution uses **Azure Container Apps** for serverless compute, **Managed Identity** for passwordless security, and **Azure Log Analytics** for monitoring.
 
 ```mermaid
+%%{init: {'theme':'dark', 'themeVariables': {
+  'primaryColor':'#1a1a2e',
+  'primaryTextColor':'#00d9ff',
+  'primaryBorderColor':'#00d9ff',
+  'secondaryColor':'#16213e',
+  'secondaryTextColor':'#c77dff',
+  'secondaryBorderColor':'#c77dff',
+  'tertiaryColor':'#0f3460',
+  'tertiaryTextColor':'#ffaa00',
+  'tertiaryBorderColor':'#ffaa00',
+  'lineColor':'#00d9ff',
+  'textColor':'#ffffff',
+  'mainBkg':'#0a0e27',
+  'nodeBorder':'#00d9ff',
+  'clusterBkg':'#16213e',
+  'clusterBorder':'#9d4edd',
+  'titleColor':'#00ffff',
+  'edgeLabelBackground':'#1a1a2e',
+  'fontFamily':'Inter, Segoe UI, sans-serif',
+  'fontSize':'16px',
+  'flowchart':{'nodeSpacing':60, 'rankSpacing':80, 'curve':'basis', 'padding':20}
+}}}%%
 graph TB
     User["👤 User / MCP Client"]
     
@@ -55,25 +77,32 @@ graph TB
     ACA -->|"📊 Telemetry<br/>Logs & Metrics"| Logs
     Kusto -.->|"📉 Query Metrics"| Logs
     
-    %% Styling
-    classDef primary fill:#0078d4,stroke:#fff,stroke-width:3px,color:#fff,font-weight:bold
-    classDef security fill:#50e6ff,stroke:#005a9e,stroke-width:2px,color:#000
-    classDef storage fill:#7fba00,stroke:#fff,stroke-width:2px,color:#fff
-    classDef monitor fill:#ffb900,stroke:#fff,stroke-width:2px,color:#000
-    classDef user fill:#68217a,stroke:#fff,stroke-width:2px,color:#fff
-    classDef container fill:#0078d4,stroke:#fff,stroke-width:2px,color:#fff
+    %% Styling - Using cyberpunk palette
+    style User fill:#1a1a2e,stroke:#00d9ff,stroke-width:4px,color:#00ffff
+    style ACA fill:#16213e,stroke:#c77dff,stroke-width:3px,color:#c77dff
+    style ACR fill:#1a1a40,stroke:#ffaa00,stroke-width:3px,color:#ffaa00
+    style MI fill:#0f3460,stroke:#9d4edd,stroke-width:3px,color:#9d4edd
+    style NSG fill:#16213e,stroke:#00d9ff,stroke-width:3px,color:#00d9ff
+    style Kusto fill:#1a1a2e,stroke:#ff6600,stroke-width:4px,color:#ff6600
+    style Storage fill:#16213e,stroke:#00ffff,stroke-width:2px,color:#00ffff
+    style Logs fill:#0f3460,stroke:#c77dff,stroke-width:3px,color:#c77dff
     
-    class ACA,Kusto primary
-    class MI,NSG security
-    class Storage,ACR storage
-    class Logs monitor
-    class User user
+    style Azure fill:#0a0e27,stroke:#9d4edd,stroke-width:3px,stroke-dasharray: 5 5,color:#00ffff
+    style Security fill:#0a0e27,stroke:#9d4edd,stroke-width:2px,color:#c77dff
+    style Compute fill:#0a0e27,stroke:#ff6600,stroke-width:2px,color:#ffaa00
+    style Data fill:#0a0e27,stroke:#00d9ff,stroke-width:2px,color:#00d9ff
+    style Monitor fill:#0a0e27,stroke:#c77dff,stroke-width:2px,color:#c77dff
     
-    style Azure fill:#f0f0f0,stroke:#0078d4,stroke-width:3px,stroke-dasharray: 5 5
-    style Security fill:#e6f7ff,stroke:#50e6ff,stroke-width:2px
-    style Compute fill:#fff,stroke:#0078d4,stroke-width:2px
-    style Data fill:#f0fff0,stroke:#7fba00,stroke-width:2px
-    style Monitor fill:#fffbf0,stroke:#ffb900,stroke-width:2px
+    %% Vibrant Connection Colors
+    linkStyle 0 stroke:#ff6600,stroke-width:3px
+    linkStyle 1 stroke:#00d9ff,stroke-width:2px
+    linkStyle 2 stroke:#c77dff,stroke-width:2px
+    linkStyle 3 stroke:#ffaa00,stroke-width:3px
+    linkStyle 4 stroke:#00d9ff,stroke-width:2px
+    linkStyle 5 stroke:#ffaa00,stroke-width:3px
+    linkStyle 6 stroke:#c77dff,stroke-width:2px
+    linkStyle 7 stroke:#00ffff,stroke-width:2px
+    linkStyle 8 stroke:#ff6600,stroke-width:2px
 ```
 
 ## ✅ Requirements
