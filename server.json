@@ -1,5 +1,5 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.4R9UN/mcp-kql-server",
   "title": "MCP KQL Server",
   "description": "Execute KQL in AI prompts via NL2KQL with schema discovery and Azure Data Explorer integration",
