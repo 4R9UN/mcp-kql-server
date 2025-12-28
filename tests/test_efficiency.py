@@ -1,8 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
 import json
-import tempfile
-import os
 from mcp_kql_server.memory import MemoryManager
 # _schema_find_tables_operation was removed - test uses MemoryManager.find_relevant_tables directly
 

@@ -17,6 +17,7 @@ import sys
 from .constants import __version__ as VERSION
 from .execute_kql import execute_kql_query
 from .mcp_server import main
+from .version_checker import check_for_updates, get_current_version
 
 # Version information
 __version__ = "2.1.0"
@@ -122,9 +123,6 @@ def _suppress_fastmcp_branding():
 _suppress_fastmcp_branding()
 _suppress_azure_logs()
 _setup_memory_directories()
-
-# Import version checker for external use
-from .version_checker import check_for_updates, get_current_version
 
 __all__ = [
     "main",
