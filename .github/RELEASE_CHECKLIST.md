@@ -5,14 +5,19 @@ Use this checklist when preparing a new release.
 ## Pre-Release Steps
 
 ### 1. Update Version Numbers
-Update version in all files to the new version (e.g., `2.0.9`):
+Update version in all files to the new version (e.g., `2.1.0`):
 
-- [ ] `pyproject.toml` - line 3: `version = "2.0.9"`
-- [ ] `mcp_kql_server/__init__.py` - line 21: `__version__ = "2.0.9"`
-- [ ] `mcp_kql_server/constants.py` - line 19: `__version__ = "2.0.9"`
-- [ ] `mcp_kql_server/constants.py` - line 88: `FASTAPI_VERSION = "2.0.9"`
-- [ ] `server.json` - line 5: `"version": "2.0.9"`
-- [ ] `server.json` - line 10: `"version": "2.0.9"` (in packages array)
+- [ ] `pyproject.toml` - line 3: `version = "2.1.0"`
+- [ ] `mcp_kql_server/__init__.py` - line 22: `__version__ = "2.1.0"`
+- [ ] `mcp_kql_server/constants.py` - line 19: `__version__ = "2.1.0"`
+- [ ] `mcp_kql_server/constants.py` - line 88: `FASTAPI_VERSION = "2.1.0"`
+- [ ] `server.json` - line 5: `"version": "2.1.0"`
+- [ ] `server.json` - line 10: `"version": "2.1.0"` (in packages array)
+
+**Quick version bump:**
+```bash
+python .github/bump_version.py 2.0.9 2.1.0
+```
 
 ### 2. Update Release Notes
 - [ ] Add new section in `RELEASE_NOTES.md` with version, date, and changes
@@ -24,8 +29,11 @@ Update version in all files to the new version (e.g., `2.0.9`):
 # Run linting
 ruff check .
 
-# Run tests (if available)
-pytest
+# Run type checking
+pylint mcp_kql_server/
+
+# Run tests
+pytest tests/ -v
 
 # Verify version consistency
 python -c "import tomli; print(f'pyproject.toml: {tomli.load(open(\"pyproject.toml\", \"rb\"))[\"project\"][\"version\"]}')"
@@ -40,8 +48,9 @@ python -m build
 # Test installation in virtual environment
 python -m venv test_env
 test_env\Scripts\activate
-pip install dist/mcp_kql_server-2.0.9-py3-none-any.whl
+pip install dist/mcp_kql_server-2.1.0-py3-none-any.whl
 # Test the package
+python -c "from mcp_kql_server import __version__; print(f'Version: {__version__}')"
 deactivate
 rm -r test_env
 ```
@@ -51,7 +60,7 @@ rm -r test_env
 ### 5. Commit Changes
 ```bash
 git add .
-git commit -m "Bump version to 2.0.9"
+git commit -m "Bump version to 2.1.0"
 git push origin main
 ```
 
@@ -67,8 +76,8 @@ twine upload dist/*
 ### 7. Create GitHub Release
 ```bash
 # Create and push tag
-git tag v2.0.9
-git push origin v2.0.9
+git tag v2.1.0
+git push origin v2.1.0
 ```
 
 ### 8. Verify Automated Publishing
@@ -92,13 +101,48 @@ curl "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.4R9UN
 
 ### 10. Update Documentation
 - [ ] Update README.md if needed
-- [ ] Update any version-specific documentation
+- [ ] Update docs/architecture.md if needed
+- [ ] Update docs/api-reference.md with API changes
+- [ ] Update docs/troubleshooting.md with new issues
 - [ ] Check that badges are displaying correctly
 
 ### 11. Announce Release
 - [ ] Create GitHub Release with release notes
 - [ ] Update project website (if applicable)
 - [ ] Post to relevant communities (if applicable)
+
+## File Checklist
+
+Ensure these files are updated/present for each release:
+
+### Core Package Files
+- [ ] `mcp_kql_server/__init__.py` - Version, exports
+- [ ] `mcp_kql_server/__main__.py` - Entry point
+- [ ] `mcp_kql_server/constants.py` - Version, constants
+- [ ] `mcp_kql_server/mcp_server.py` - Main server
+- [ ] `mcp_kql_server/execute_kql.py` - Query execution
+- [ ] `mcp_kql_server/kql_auth.py` - Authentication
+- [ ] `mcp_kql_server/kql_validator.py` - Query validation
+- [ ] `mcp_kql_server/memory.py` - Schema memory
+- [ ] `mcp_kql_server/performance.py` - Performance utilities
+- [ ] `mcp_kql_server/utils.py` - Utilities
+- [ ] `mcp_kql_server/ai_prompts.py` - AI prompts
+- [ ] `mcp_kql_server/mcp_registry.py` - Registry support
+- [ ] `mcp_kql_server/py.typed` - Type marker
+
+### Documentation Files
+- [ ] `README.md` - Main documentation
+- [ ] `RELEASE_NOTES.md` - Release history
+- [ ] `CONTRIBUTING.md` - Contribution guidelines
+- [ ] `SECURITY.md` - Security policy
+- [ ] `docs/architecture.md` - Architecture diagram
+- [ ] `docs/api-reference.md` - API documentation
+- [ ] `docs/troubleshooting.md` - Troubleshooting guide
+
+### Configuration Files
+- [ ] `pyproject.toml` - Project metadata
+- [ ] `server.json` - MCP server config
+- [ ] `requirements.txt` - Dependencies
 
 ## Troubleshooting
 
@@ -118,15 +162,23 @@ curl "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.4R9UN
 - Ensure server.json is valid
 
 **Version mismatch:**
-- Use grep to find all version references: `grep -r "2\.0\.[0-9]" --include="*.py" --include="*.toml" --include="*.json"`
+- Use grep to find all version references: `grep -r "2\.[0-9]\.[0-9]" --include="*.py" --include="*.toml" --include="*.json"`
 - Update all occurrences to match
+- Use bump_version.py: `python .github/bump_version.py <old> <new>`
 
 ## Quick Version Bump Script
 
+Use the Python script for automatic version bumping:
+```bash
+# Update all version files automatically
+python .github/bump_version.py 2.0.9 2.1.0
+```
+
+Or use this bash script for manual updates:
 ```bash
 # Save this as bump_version.sh
-OLD_VERSION="2.0.8"
-NEW_VERSION="2.0.9"
+OLD_VERSION="2.0.9"
+NEW_VERSION="2.1.0"
 
 # Update all version files
 sed -i "s/$OLD_VERSION/$NEW_VERSION/g" pyproject.toml
@@ -141,7 +193,7 @@ echo "Remember to update RELEASE_NOTES.md manually!"
 ## Version History Template
 
 ```markdown
-## 📦 **v2.0.9 - [Release Title]**
+## 📦 **v2.1.0 - [Release Title]**
 
 > **[Brief Description]** 🚀
 
@@ -150,7 +202,7 @@ echo "Remember to update RELEASE_NOTES.md manually!"
 **Email**: arjuntrivedi42@yahoo.com
 **Repository**: https://github.com/4R9UN/mcp-kql-server
 
-### 🚀 **What's New in v2.0.9**
+### 🚀 **What's New in v2.1.0**
 
 #### **1. [Feature Category]**
 - **Feature 1**: Description

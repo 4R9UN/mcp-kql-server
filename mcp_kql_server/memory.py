@@ -47,29 +47,52 @@ TOON_TYPE_MAP = {
 }
 
 class SemanticSearch:
-    """Handles embedding generation and similarity search."""
+    """Handles embedding generation and similarity search with optimized loading."""
+    _instance = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls, model_name='all-MiniLM-L6-v2'):
+        """Singleton pattern to share model across instances."""
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False  # pylint: disable=protected-access
+            return cls._instance
+
     def __init__(self, model_name='all-MiniLM-L6-v2'):
+        if getattr(self, '_initialized', False):
+            return
         self.model_name = model_name
         self.model = None
-        # Do not load model at startup
-        
+        self._loading = False
+        self._load_lock = threading.Lock()
+        self._initialized = True
+
+    def preload(self):
+        """Preload model in background thread for faster first query."""
+        if self.model is None and not self._loading and HAS_SENTENCE_TRANSFORMERS:
+            threading.Thread(target=self._load_model, daemon=True).start()
+
     def _load_model(self):
-        """Lazy load the model on first use."""
-        if self.model is None and HAS_SENTENCE_TRANSFORMERS:
-            try:
-                # Suppress verbose output from sentence-transformers
-                logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
-                if SentenceTransformer:
-                    self.model = SentenceTransformer(self.model_name)
-                logger.info("Loaded Semantic Search model: %s", self.model_name)
-            except Exception as e:
-                logger.warning("Failed to load SentenceTransformer: %s", e)
+        """Thread-safe lazy load of the model."""
+        with self._load_lock:
+            if self.model is None and HAS_SENTENCE_TRANSFORMERS:
+                self._loading = True
+                try:
+                    logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+                    if SentenceTransformer:
+                        self.model = SentenceTransformer(self.model_name)
+                    logger.info("Loaded Semantic Search model: %s", self.model_name)
+                except Exception as e:
+                    logger.warning("Failed to load SentenceTransformer: %s", e)
+                finally:
+                    self._loading = False
 
     def encode(self, text: str) -> Optional[bytes]:
         """Generate embedding for text and return as bytes."""
         # Lazy load model if needed
         self._load_model()
-        
+
         if self.model is None:
             return None
         try:
@@ -84,6 +107,7 @@ class SemanticSearch:
 
 @dataclass
 class ValidationResult:
+    """Result of query validation against schema."""
     is_valid: bool
     validated_query: str
     errors: List[str]
@@ -97,6 +121,7 @@ class MemoryManager:
         self.db_path = self._get_db_path(db_path)
         self.semantic_search = SemanticSearch()
         self._lock = threading.RLock()
+        self._schema_cache: Dict[str, Any] = {}  # Initialize schema cache in __init__
         self._init_db()
 
     @property
@@ -402,53 +427,57 @@ class MemoryManager:
             for row in cursor:
                 hints.append(f"{row[0]} joins with {row[1]} on {row[2]}")
 
-        return list(set(hints)) # Deduplicate
+        return list(set(hints))
 
     def _get_database_schema(self, cluster: str, database: str) -> List[Dict[str, Any]]:
-        """Internal method to get schema from SQLite."""
+        """Get schema from SQLite with caching."""
+        cache_key = f"db_schema_{cluster}_{database}"
+        # Simple in-memory cache check
+        if hasattr(self, '_schema_cache') and cache_key in self._schema_cache:
+            cached = self._schema_cache[cache_key]
+            if (datetime.now() - cached['ts']).seconds < 300:  # 5 min TTL
+                return cached['data']
+
         with self._lock, sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "SELECT table_name, columns_json FROM schemas WHERE cluster = ? AND database = ?",
                 (cluster, database)
             )
-            schemas = []
-            for row in cursor:
-                schemas.append({
-                    "table": row[0],
-                    "columns": json.loads(row[1])
-                })
-            return schemas
+            schemas = [{"table": row[0], "columns": json.loads(row[1])} for row in cursor]
 
-    def get_relevant_context(self, cluster: str, database: str,
-                             user_query: str) -> str:
+        # Cache result
+        if not hasattr(self, '_schema_cache'):
+            self._schema_cache = {}
+        self._schema_cache[cache_key] = {'data': schemas, 'ts': datetime.now()}
+        return schemas
+
+    def get_relevant_context(self, cluster: str, database: str, user_query: str, max_tables: int = 20) -> str:
         """
-        CAG Core: Retrieve full schema and relevant past queries, formatted as TOON.
+        Optimized CAG: Get schema + similar queries + join hints in TOON format.
+        Limited to max_tables to prevent token overflow.
         """
-        # 1. Get all tables for the database (CAG loads full schema context)
-        schemas = self._get_database_schema(cluster, database)
+        # 1. Get schemas (limited)
+        schemas = self._get_database_schema(cluster, database)[:max_tables]
         table_names = [s["table"] for s in schemas]
 
-        # 2. Get similar queries (Few-Shot RAG)
-        similar_queries = self.find_similar_queries(cluster, database, user_query)
+        # 2. Get similar queries (parallel-safe)
+        similar_queries = self.find_similar_queries(cluster, database, user_query, limit=3)
 
-        # 3. Get Join Hints
-        join_hints = self.get_join_hints(table_names)
+        # 3. Get join hints
+        join_hints = self.get_join_hints(table_names) if table_names else []
 
-        # 4. Format as TOON
+        # 4. Format as compact TOON
         return self._to_toon(schemas, similar_queries, join_hints)
 
     def _to_toon(self, schemas: List[Dict], similar_queries: List[Dict],
                  join_hints: Optional[List[str]] = None) -> str:
-        """
-        Convert context to TOON (Token-Oriented Object Notation).
-        Format: Table(Col:Type, ...)
-        """
+        """Optimized TOON formatting with size limits."""
         lines = ["<CAG_CONTEXT>"]
 
-        # Syntax Guidance Section
-        lines.append(get_kql_operator_syntax_guidance())
+        # Compact syntax guidance
+        lines.append("# KQL Rules: Use != (not ! =), !contains, !in, !has. No spaces in negation.")
 
-        # Schema Section
+        # Schema Section (compact)
         if schemas:
             lines.append("# Schema (TOON)")
             for schema in schemas:
@@ -498,14 +527,12 @@ class MemoryManager:
             logger.error("Failed to clear memory: %s", e)
             return False
 
+    # Use centralized normalize_cluster_uri from utils.py
+    # Import at method level to avoid circular imports
     def normalize_cluster_uri(self, uri: str) -> str:
-        """Normalize cluster URI."""
-        if not uri:
-            return ""
-        uri = uri.strip().lower()
-        if uri.startswith("https://"):
-            return uri
-        return f"https://{uri}"
+        """Normalize cluster URI - delegates to utils."""
+        from .utils import normalize_cluster_uri as _normalize
+        return _normalize(uri) if uri else ""
 
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get statistics about the memory database."""
@@ -579,10 +606,15 @@ class MemoryManager:
         dummy_query = f"Querying tables: {table_str}"
         return self.get_relevant_context(cluster, database, dummy_query)
 
-    def validate_query(self, query: str, cluster: str, database: str) -> ValidationResult:
+    def validate_query(self, query: str, cluster: str, database: str) -> ValidationResult:  # pylint: disable=unused-argument
         """
         Validate query against schema.
         Returns an object with is_valid, validated_query, errors.
+
+        Args:
+            query: The KQL query to validate
+            cluster: Cluster URL (reserved for future use)
+            database: Database name (reserved for future use)
         """
         # Simple validation stub
         return ValidationResult(
@@ -616,15 +648,16 @@ class MemoryManager:
         return {"clusters": {}}
 
     def save_corpus(self):
-        """Compatibility method for legacy save_corpus calls."""
-        pass
+        """Compatibility method for legacy save_corpus calls (no-op)."""
+        # This is intentionally empty for backwards compatibility
+        return None
 
 # Global instance
 _memory_manager = None
 
 def get_memory_manager() -> MemoryManager:
     """Get the singleton MemoryManager instance."""
-    global _memory_manager
+    global _memory_manager  # pylint: disable=global-statement
     if _memory_manager is None:
         _memory_manager = MemoryManager()
     return _memory_manager

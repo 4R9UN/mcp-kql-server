@@ -12,19 +12,38 @@ Email: arjuntrivedi42@yahoo.com
 
 import logging
 import os
+import sys
 
 from .constants import __version__ as VERSION
 from .execute_kql import execute_kql_query
 from .mcp_server import main
 
 # Version information
-__version__ = "2.0.9"
+__version__ = "2.1.0"
 __author__ = "Arjun Trivedi"
 __email__ = "arjuntrivedi42@yahoo.com"
 
-# Configure basic logging
+# Force UTF-8 encoding for stdout/stderr to handle any Unicode gracefully
+# Use getattr() to avoid Pylance type checker issues with TextIO vs TextIOWrapper
+_stdout_reconfigure = getattr(sys.stdout, 'reconfigure', None)
+if _stdout_reconfigure is not None:
+    try:
+        _stdout_reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, OSError):
+        pass
+
+_stderr_reconfigure = getattr(sys.stderr, 'reconfigure', None)
+if _stderr_reconfigure is not None:
+    try:
+        _stderr_reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, OSError):
+        pass
+
+# Configure basic logging (ASCII-safe format)
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stderr
 )
 
 logger = logging.getLogger(__name__)
@@ -104,10 +123,14 @@ _suppress_fastmcp_branding()
 _suppress_azure_logs()
 _setup_memory_directories()
 
+# Import version checker for external use
+from .version_checker import check_for_updates, get_current_version
 
 __all__ = [
     "main",
     "execute_kql_query",
     "VERSION",
     "__version__",
+    "check_for_updates",
+    "get_current_version",
 ]

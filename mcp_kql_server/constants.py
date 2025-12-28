@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-# Version information
-__version__ = "2.0.8"
+# Version information - Single source of truth from pyproject.toml
+__version__ = "2.1.0"
 VERSION = __version__
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
@@ -85,7 +85,7 @@ Perfect for SOC analysts, threat hunters, and security researchers working with 
 
 # FastAPI Configuration
 FASTAPI_TITLE = "MCP KQL Local AI Agent"
-FASTAPI_VERSION = "2.0.8"
+FASTAPI_VERSION = __version__  # Use single source of truth
 FASTAPI_DESCRIPTION = "Local AI-powered KQL Server with no external dependencies"
 FASTAPI_HOST = "0.0.0.0"
 FASTAPI_PORT = 8000

@@ -12,6 +12,8 @@ import re
 import logging
 from typing import Dict, List, Any
 
+from .constants import KQL_RESERVED_WORDS
+
 logger = logging.getLogger(__name__)
 
 
@@ -145,15 +147,8 @@ class KQLValidator:
         return list(tables)
 
     def _is_kql_keyword(self, word: str) -> bool:
-        """Check if word is a KQL keyword."""
-        keywords = {
-            'where', 'project', 'extend', 'summarize', 'take', 'limit',
-            'sort', 'order', 'top', 'count', 'distinct', 'join', 'union',
-            'let', 'as', 'by', 'on', 'and', 'or', 'not', 'in', 'has',
-            'contains', 'startswith', 'endswith', 'between', 'ago', 'now',
-            'datetime', 'timespan', 'render', 'evaluate', 'parse', 'mv-expand'
-        }
-        return word.lower() in keywords
+        """Check if word is a KQL keyword using centralized reserved words."""
+        return word.lower() in {w.lower() for w in KQL_RESERVED_WORDS}
 
     async def _ensure_schemas_exist(
         self,
@@ -229,24 +224,138 @@ class KQLValidator:
             return errors, warnings, 0
 
     def _extract_column_references(self, query: str, _table: str) -> List[str]:
-        """Extract column references from query."""
+        """
+        Extract column references from query that need validation.
+        
+        Only extracts columns being READ from tables, NOT aliases being CREATED.
+        """
         columns = set()
+        
+        # First, extract all aliases being created (should NOT validate these)
+        created_aliases = self._extract_created_aliases(query)
+        
+        # KQL aggregation functions that create output columns
+        aggregation_functions = {
+            'count', 'dcount', 'sum', 'avg', 'min', 'max', 'percentile',
+            'make_set', 'make_list', 'make_bag', 'countif', 'dcountif',
+            'sumif', 'avgif', 'arg_max', 'arg_min', 'any', 'take_any',
+            'stdev', 'variance', 'count_distinct', 'binary_all_and',
+            'binary_all_or', 'binary_all_xor', 'buildschema', 'hll',
+            'hll_merge', 'tdigest', 'tdigest_merge', 'percentiles'
+        }
 
-        # Pattern for column references in common operators
-        # Matches: where Column, project Column, extend Column, summarize by Column
-        patterns = [
-            r'(?:where|project|extend|summarize|by)\s+([A-Za-z_][\w]*)',
-            r'([A-Za-z_][\w]*)\s*(?:==|!=|<|>|<=|>=|contains|has|startswith)',
-        ]
-
-        for pattern in patterns:
-            matches = re.finditer(pattern, query, re.IGNORECASE)
-            for match in matches:
-                col_name = match.group(1).strip()
-                if not self._is_kql_keyword(col_name):
+        # Pattern for columns in WHERE clause (reading from table)
+        where_pattern = r'\|\s*where\s+(.+?)(?=\||$)'
+        for match in re.finditer(where_pattern, query, re.IGNORECASE | re.DOTALL):
+            where_clause = match.group(1)
+            # Extract column names from conditions (left side of operators)
+            col_pattern = r'([A-Za-z_][\w]*)\s*(?:==|!=|<>|<=|>=|<|>|contains|has|startswith|endswith|matches|in\s*\(|!in\s*\(|has_any|has_all|!contains|!has)'
+            for col_match in re.finditer(col_pattern, where_clause, re.IGNORECASE):
+                col_name = col_match.group(1).strip()
+                if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
                     columns.add(col_name)
+            
+            # Also check isnotempty/isempty/isnull/isnotnull function arguments
+            func_pattern = r'(?:isnotempty|isempty|isnull|isnotnull|strlen|toupper|tolower)\s*\(\s*([A-Za-z_][\w]*)\s*\)'
+            for func_match in re.finditer(func_pattern, where_clause, re.IGNORECASE):
+                col_name = func_match.group(1).strip()
+                if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
+                    columns.add(col_name)
+        
+        # Pattern for columns in summarize BY clause (reading from table)
+        summarize_by_pattern = r'\|\s*summarize\s+.+?\s+by\s+([^|]+?)(?=\||$)'
+        for match in re.finditer(summarize_by_pattern, query, re.IGNORECASE | re.DOTALL):
+            by_clause = match.group(1)
+            # Extract columns in by clause, skip bin() and other functions
+            for part in by_clause.split(','):
+                part = part.strip()
+                # Skip bin(Column, ...) - extract column inside
+                bin_match = re.match(r'bin\s*\(\s*([A-Za-z_][\w]*)', part, re.IGNORECASE)
+                if bin_match:
+                    col_name = bin_match.group(1).strip()
+                    if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
+                        columns.add(col_name)
+                # Skip alias assignments like Timestamp = bin(...)
+                elif '=' in part and not part.strip().startswith('='):
+                    continue
+                else:
+                    # Simple column reference
+                    col_match = re.match(r'^([A-Za-z_][\w]*)\s*$', part)
+                    if col_match:
+                        col_name = col_match.group(1).strip()
+                        if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
+                            columns.add(col_name)
+        
+        # Pattern for columns inside aggregation functions (reading from table)
+        # e.g., dcount(ApplicationEventId), min(CreatedOn), max(Timestamp)
+        agg_func_pattern = r'(?:' + '|'.join(aggregation_functions) + r')\s*\(\s*([A-Za-z_][\w]*)'
+        for match in re.finditer(agg_func_pattern, query, re.IGNORECASE):
+            col_name = match.group(1).strip()
+            if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
+                columns.add(col_name)
+        
+        # Pattern for columns in order by / sort by (only validate if before summarize or references table columns)
+        # Skip these as they often reference summarize output columns
+        
+        # Pattern for columns in join conditions
+        join_pattern = r'\|\s*join\s+.+?\s+on\s+([^|]+?)(?=\||$)'
+        for match in re.finditer(join_pattern, query, re.IGNORECASE | re.DOTALL):
+            on_clause = match.group(1)
+            for part in on_clause.split(','):
+                part = part.strip()
+                # Handle $left.Col == $right.Col syntax
+                col_match = re.findall(r'(?:\$left\.|\$right\.)?([A-Za-z_][\w]*)', part)
+                for col_name in col_match:
+                    if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
+                        columns.add(col_name)
 
         return list(columns)
+    
+    def _extract_created_aliases(self, query: str) -> set:
+        """
+        Extract column aliases that are CREATED in the query (not read from tables).
+        These should NOT be validated against table schema.
+        """
+        aliases = set()
+        
+        # KQL aggregation functions
+        aggregation_functions = {
+            'count', 'dcount', 'sum', 'avg', 'min', 'max', 'percentile',
+            'make_set', 'make_list', 'make_bag', 'countif', 'dcountif',
+            'sumif', 'avgif', 'arg_max', 'arg_min', 'any', 'take_any',
+            'stdev', 'variance', 'count_distinct', 'percentiles'
+        }
+        
+        # Pattern 1: Explicit aliases in summarize - Alias = function()
+        # e.g., TotalAlerts = count(), FirstSeen = min(Timestamp)
+        alias_pattern = r'([A-Za-z_][\w]*)\s*=\s*(?:' + '|'.join(aggregation_functions) + r')\s*\('
+        for match in re.finditer(alias_pattern, query, re.IGNORECASE):
+            aliases.add(match.group(1).strip())
+        
+        # Pattern 2: Explicit aliases in extend
+        # e.g., extend NewCol = expression
+        extend_pattern = r'\|\s*extend\s+([A-Za-z_][\w]*)\s*='
+        for match in re.finditer(extend_pattern, query, re.IGNORECASE):
+            aliases.add(match.group(1).strip())
+        
+        # Pattern 3: Explicit aliases in project
+        # e.g., project NewName = OldName
+        project_alias_pattern = r'\|\s*project(?:-reorder|-away|-keep|-rename)?\s+.*?([A-Za-z_][\w]*)\s*='
+        for match in re.finditer(project_alias_pattern, query, re.IGNORECASE):
+            aliases.add(match.group(1).strip())
+        
+        # Pattern 4: Default aggregation column names (when no alias given)
+        # e.g., count() creates count_, dcount(X) creates count_X
+        if re.search(r'\bcount\s*\(\s*\)', query, re.IGNORECASE):
+            aliases.add('count_')
+        
+        # Pattern 5: Aliases in summarize by with assignment
+        # e.g., by NewTimestamp = bin(Timestamp, 1h)
+        by_alias_pattern = r'\bby\s+(?:[^|]*?,\s*)*([A-Za-z_][\w]*)\s*='
+        for match in re.finditer(by_alias_pattern, query, re.IGNORECASE):
+            aliases.add(match.group(1).strip())
+        
+        return aliases
 
     def _validate_operator_syntax(self, query: str) -> List[str]:
         """Validate KQL operator syntax."""

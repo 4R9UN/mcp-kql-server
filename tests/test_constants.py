@@ -10,10 +10,9 @@ def test_version_constants():
     """Test version constants are properly defined."""
     try:
         from mcp_kql_server.constants import __version__
-
-        assert __version__ == "2.0.8"
+        # Version should match pyproject.toml (2.1.0)
+        assert __version__ == "2.1.0"
     except ImportError:
-        # Skip test if module not available in CI
         pass
 
 
@@ -24,14 +23,13 @@ def test_server_constants():
             DEFAULT_CONNECTION_TIMEOUT,
             DEFAULT_QUERY_TIMEOUT,
             SERVER_NAME,
+            __version__,
         )
-
-        assert SERVER_NAME == "mcp-kql-server(2.0.8)"
+        # Dynamic check - SERVER_NAME should include current version
+        assert SERVER_NAME == f"mcp-kql-server({__version__})"
         assert DEFAULT_CONNECTION_TIMEOUT > 0
         assert DEFAULT_QUERY_TIMEOUT > 0
-
     except ImportError:
-        # Skip test if module not available in CI
         pass
 
 

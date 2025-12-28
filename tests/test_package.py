@@ -10,13 +10,11 @@ def test_package_imports():
     """Test that package imports work correctly."""
     try:
         import mcp_kql_server
-
         assert hasattr(mcp_kql_server, "__version__")
         assert hasattr(mcp_kql_server, "__author__")
-        assert mcp_kql_server.__version__ == "2.0.8"
+        assert mcp_kql_server.__version__ == "2.1.0"
         assert mcp_kql_server.__author__ == "Arjun Trivedi"
     except ImportError:
-        # Skip test if package not available in CI
         pass
 
 
@@ -25,10 +23,9 @@ def test_version_consistency():
     try:
         from mcp_kql_server import __version__ as pkg_version
         from mcp_kql_server.constants import __version__ as const_version
-
-        assert pkg_version == const_version == "2.0.8"
+        # Both should match - 2.1.0
+        assert pkg_version == const_version == "2.1.0"
     except ImportError:
-        # Skip test if modules not available in CI
         pass
 
 
@@ -56,11 +53,10 @@ def test_module_structure():
     for module_name in expected_modules:
         try:
             __import__(module_name)
-            # If we get here, the module exists
-            pass
+            # Module import successful
         except ImportError:
             # Skip individual module if not available
-            pass
+            continue
 
 
 def test_basic_functionality():

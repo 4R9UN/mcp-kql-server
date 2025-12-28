@@ -77,7 +77,7 @@ Typography:
 ⚠️ STRICT COLOR COMPLIANCE:
 Use ONLY the colors listed above. Do NOT use:
   - #00ff88 (neon green) - NOT in palette
-  - #ff3366 (neon red) - NOT in palette  
+  - #ff3366 (neon red) - NOT in palette
   - Any custom colors not explicitly listed
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -130,7 +130,7 @@ graph TB
   Decision -->|Yes| Process[⚙️ Process Data]
   Decision -->|No| Error([❌ Error State])
   Process --> Success([✅ Success])
-  
+
   %% Node Styles (using only palette colors)
   style Start fill:#1a1a2e,stroke:#00d9ff,stroke-width:3px,color:#00ffff
   style Validate fill:#16213e,stroke:#c77dff,stroke-width:2px,color:#c77dff
@@ -171,7 +171,7 @@ sequenceDiagram
   participant U as 👤 User
   participant S as 🖥️ System
   participant D as 💾 Database
-  
+
   U->>+S: 📤 Send Request
   S->>+D: 🔍 Query Data
   D-->>-S: 📊 Return Results
@@ -485,10 +485,10 @@ def build_generation_prompt(
     if schema and schema.get("columns"):
         prompt_parts.append("SCHEMA CONTEXT:")
         prompt_parts.append(f"Table: {table_name or schema.get('table', 'Unknown')}")
-        
+
         # Extract column names for critical rules section
         column_names = list(schema["columns"].keys())
-        
+
         prompt_parts.append("Columns:")
 
         for col_name, col_info in list(schema["columns"].items())[:20]:  # Limit to 20 columns
@@ -496,14 +496,14 @@ def build_generation_prompt(
             description = col_info.get("description", "")
 
             col_line = f"  - {col_name} ({data_type})"
-            
+
             # Add sample values if available
             sample_values = col_info.get("sample_values", [])
             if sample_values:
                 # Format samples nicely
                 samples_str = ", ".join(str(v) for v in sample_values[:2])
                 col_line += f" [Samples: {samples_str}]"
-            
+
             if description:
                 col_line += f": {description[:50]}"
             prompt_parts.append(col_line)
@@ -512,7 +512,7 @@ def build_generation_prompt(
             prompt_parts.append(f"  ... and {len(schema['columns']) - 20} more columns")
 
         prompt_parts.append("")
-        
+
         # Add CRITICAL RULES section
         prompt_parts.append("⚠️ CRITICAL RULES - COLUMN NAMES:")
         prompt_parts.append("1. Use ONLY these EXACT column names (case-sensitive):")
@@ -529,7 +529,7 @@ def build_generation_prompt(
     # Add few-shot examples (optional)
     if include_examples:
         prompt_parts.append("EXAMPLES:")
-        
+
         # Add dynamic similar queries if available
         if similar_queries:
             prompt_parts.append("--- RELEVANT PAST QUERIES (High Confidence) ---")

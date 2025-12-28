@@ -3,12 +3,12 @@
   "name": "io.github.4R9UN/mcp-kql-server",
   "title": "MCP KQL Server",
   "description": "Execute KQL in AI prompts via NL2KQL with schema discovery and Azure Data Explorer integration",
-  "version": "2.0.9",
+  "version": "2.1.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-kql-server",
-      "version": "2.0.9",
+      "version": "2.1.0",
       "transport": {
         "type": "stdio"
       }

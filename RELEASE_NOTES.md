@@ -2,6 +2,68 @@
 
 ---
 
+## 🚀 **v2.1.0 - NL2KQL Enhancement & Version Management**
+
+> **Schema-Only NL2KQL & Auto-Update Functionality** 🧠
+
+**Release Date**: December 28, 2025
+**Author**: Arjun Trivedi
+**Email**: arjuntrivedi42@yahoo.com
+**Repository**: https://github.com/4R9UN/mcp-kql-server
+
+### 🚀 **What's New in v2.1.0**
+
+This release brings significant improvements to Natural Language to KQL (NL2KQL) accuracy and introduces automatic version management capabilities.
+
+#### **1. NL2KQL Schema-Only Approach**
+- **🎯 100% Schema-Driven**: NL2KQL now uses ONLY data from schema memory - no hardcoded table, cluster, or column names
+- **🔍 Semantic Table Search**: Uses `find_relevant_tables()` for intelligent table discovery
+- **✅ Strict Column Validation**: All columns are validated against schema memory before use
+- **📝 Clear Error Messages**: Returns helpful errors when schema is not discovered yet
+
+#### **2. PyPI Version Checker**
+- **🔄 Auto-Update Detection**: Checks PyPI for new versions at startup
+- **📢 Update Notifications**: Notifies users when a new version is available
+- **⚡ Optional Auto-Install**: Can automatically install updates with `auto_update=True`
+- **🛡️ Safe Fallback**: Gracefully handles network errors or offline mode
+
+#### **3. Log Improvements**
+- **📋 Unicode Removed**: All emoji characters replaced with ASCII equivalents
+- **🖥️ Better Console Output**: Cleaner logs for terminals that don't support Unicode
+- **📊 UTF-8 Encoding**: Added UTF-8 encoding configuration for stdout/stderr
+
+#### **4. New Module: version_checker.py**
+- `get_current_version()` - Returns installed version
+- `fetch_latest_pypi_version()` - Fetches latest from PyPI API
+- `compare_versions()` - Compares version strings
+- `check_for_updates(auto_update=False)` - Main update check function
+- `install_update()` - Runs pip upgrade
+- `startup_version_check()` - Called at server startup
+
+### 🐛 **Bug Fixes**
+- **NL2KQL Fix**: Resolved issue where words like "getschema" were incorrectly extracted as table names
+- **Test Fixes**: Updated test mocking to properly handle client cache clearing
+- **Import Fix**: Added proper module exports for version checker functions
+
+### 📦 **Installation & Upgrade**
+
+#### **New Installation**
+```bash
+pip install mcp-kql-server==2.1.0
+```
+
+#### **Upgrade from Previous Versions**
+```bash
+pip install --upgrade mcp-kql-server
+```
+
+### ✅ **Quality Assurance**
+- **Tests**: 59 passed, 1 skipped
+- **Code Quality**: All pylint issues resolved
+- **Verified**: Full regression testing passed for all core functionalities
+
+---
+
 ## 🚀 **v2.0.9 - Major MCP Update & Intelligence Upgrade**
 
 > **CAG & SQLite Optimization Release** 🧠

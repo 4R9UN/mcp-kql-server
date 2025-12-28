@@ -8,6 +8,8 @@ mcp-name: io.github.4R9UN/mcp-kql-server
 
 A Model Context Protocol (MCP) server that transforms natural language questions into optimized KQL queries with intelligent schema discovery, AI-powered caching, and seamless Azure Data Explorer integration. Simply ask questions in plain English and get instant, accurate KQL queries with context-aware results.
 
+**Latest Version: v2.1.0** - Now with schema-only NL2KQL and auto-update detection!
+
 <!-- Badges Section -->
 
 [![Verified on MseeP](https://mseep.ai/badge.svg)](https://mseep.ai/app/18772353-3d90-4b12-a253-cf752efaadd2)
@@ -32,6 +34,15 @@ A Model Context Protocol (MCP) server that transforms natural language questions
 Watch a quick demo of the MCP KQL Server in action:
 
 [![MCP KQL Server Demo](https://img.youtube.com/vi/Ca-yuThJ3Vc/0.jpg)](https://www.youtube.com/watch?v=Ca-yuThJ3Vc)
+
+## 🆕 What's New in v2.1.0
+
+- **🎯 Schema-Only NL2KQL**: Natural Language to KQL now uses ONLY data from schema memory - no hardcoded values
+- **🔄 Auto-Update Detection**: Checks PyPI for new versions at startup with optional auto-install
+- **📋 Clean Logs**: Removed Unicode characters for better terminal compatibility
+- **✅ Improved Accuracy**: Better column validation against discovered schema
+
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
 
 ## 🚀 Features
 

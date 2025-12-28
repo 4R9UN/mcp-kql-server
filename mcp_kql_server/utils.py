@@ -126,6 +126,20 @@ def bracket_if_needed(identifier: str) -> str:
 
     return identifier
 
+
+def normalize_cluster_uri(cluster_uri: str) -> str:
+    """
+    Normalize cluster URI for consistent connection handling.
+    This is the single source of truth for URI normalization.
+    """
+    if not cluster_uri:
+        raise ValueError("Cluster URI cannot be None or empty")
+    uri = cluster_uri.strip().lower()
+    if not uri.startswith("https://"):
+        uri = f"https://{uri}"
+    return uri.rstrip("/")
+
+
 def get_default_cluster_memory_path() -> Path:
     """Return a sensible default path for cluster memory storage.
 
@@ -1368,7 +1382,7 @@ class SchemaManager:
         """
         if table_name not in self._table_locations:
             self._table_locations[table_name] = []
-        
+
         location = (cluster, database)
         if location not in self._table_locations[table_name]:
             self._table_locations[table_name].append(location)

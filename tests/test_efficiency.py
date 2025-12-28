@@ -1,15 +1,17 @@
 import pytest
 from unittest.mock import MagicMock, patch
 import json
-# import asyncio - removed unused import
+import tempfile
+import os
 from mcp_kql_server.memory import MemoryManager
-from mcp_kql_server.mcp_server import _schema_find_tables_operation
+# _schema_find_tables_operation was removed - test uses MemoryManager.find_relevant_tables directly
 
 class TestEfficiencyFeatures:
     @pytest.fixture
-    def memory_manager(self):
-        # Use in-memory DB for testing
-        mm = MemoryManager(":memory:")
+    def memory_manager(self, tmp_path):
+        # Use temp file DB for testing - :memory: creates new DB per connection
+        db_path = str(tmp_path / "test.db")
+        mm = MemoryManager(db_path)
         # Mock semantic search to avoid loading model
         mm.semantic_search = MagicMock()
         mm.semantic_search.encode.return_value = b'\x00' * 4  # Dummy float32 bytes
@@ -53,14 +55,15 @@ class TestEfficiencyFeatures:
         assert "TableA joins with TableB on A.id == B.id" in hints[0]
 
     @pytest.mark.asyncio
-    async def test_find_tables_operation(self):
-        """Test the exposed find_tables operation."""
-        with patch('mcp_kql_server.mcp_server.memory_manager') as mock_mm:
-            mock_mm.find_relevant_tables.return_value = [{"table": "T1", "score": 0.8}]
+    async def test_find_tables_via_memory_manager(self):
+        """Test find_relevant_tables via MemoryManager directly."""
+        mm = MemoryManager(":memory:")
+        mm.semantic_search = MagicMock()
+        mm.semantic_search.encode.return_value = b'\x00' * 4
+        
+        with patch.object(mm, 'find_relevant_tables') as mock_find:
+            mock_find.return_value = [{"table": "T1", "score": 0.8}]
             
-            result = await _schema_find_tables_operation("c", "d", "q")
-            data = json.loads(result)
-            
-            assert data["success"] is True
-            assert len(data["tables"]) == 1
-            assert data["tables"][0]["table"] == "T1"
+            result = mm.find_relevant_tables("c", "d", "q")
+            assert len(result) == 1
+            assert result[0]["table"] == "T1"

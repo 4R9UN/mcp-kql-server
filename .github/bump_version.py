@@ -30,7 +30,7 @@ def update_file(file_path: Path, old_version: str, new_version: str) -> bool:
 def main():
     if len(sys.argv) != 3:
         print("Usage: python bump_version.py <old_version> <new_version>")
-        print("Example: python bump_version.py 2.0.8 2.0.9")
+        print("Example: python bump_version.py 2.0.9 2.1.0")
         sys.exit(1)
     
     old_version = sys.argv[1]

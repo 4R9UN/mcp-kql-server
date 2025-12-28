@@ -27,6 +27,7 @@ from .utils import (
     extract_cluster_and_database_from_query,
     extract_tables_from_query,
     generate_query_description,
+    normalize_cluster_uri,
     retry_on_exception
 )
 
@@ -96,29 +97,19 @@ def validate_query(query: str) -> Tuple[str, str]:
         raise ValueError(f"Invalid query format: {e}") from e
 
 
-def _normalize_cluster_uri(cluster_uri: str) -> str:
-    """Normalize cluster URI for connection."""
-    if not cluster_uri:
-        raise ValueError("Cluster URI cannot be None or empty")
-
-    if not cluster_uri.startswith("https://"):
-        cluster_uri = f"https://{cluster_uri}"
-    return cluster_uri.rstrip("/")
-
-
+# Use centralized normalize_cluster_uri from utils.py
 # Client cache for pooling
 _client_cache = {}
 
 def _get_kusto_client(cluster_url: str) -> KustoClient:
     """Create and authenticate a Kusto client with pooling."""
-    # Normalize URL for consistent caching
-    normalized_url = _normalize_cluster_uri(cluster_url)
-    
+    normalized_url = normalize_cluster_uri(cluster_url)
+
     if normalized_url not in _client_cache:
         logger.info("Creating new Kusto client for %s", normalized_url)
         kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(normalized_url)
         _client_cache[normalized_url] = KustoClient(kcsb)
-    
+
     return _client_cache[normalized_url]
 
 def _parse_kusto_response(response) -> pd.DataFrame:
@@ -155,7 +146,7 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _time
     Core synchronous function to execute a KQL query against a Kusto cluster.
     Adds configurable request timeout and uses retry decorator for transient failures.
     """
-    cluster_url = _normalize_cluster_uri(cluster)
+    cluster_url = normalize_cluster_uri(cluster)
     logger.info("Executing KQL on %s/%s: %s...", cluster_url, database, kql_query[:150])
 
     client = _get_kusto_client(cluster_url)
@@ -328,10 +319,20 @@ async def _post_execution_learning_bg(query: str, cluster: str, database: str, _
     This runs asynchronously to avoid blocking query response.
     """
     try:
+        # Skip schema discovery for management commands (they don't reference real tables)
+        if query.strip().startswith('.'):
+            logger.debug("Skipping schema discovery for management command")
+            return
+
         # Extract table names from the executed query using the enhanced parse_query_entities
         from .utils import parse_query_entities
         entities = parse_query_entities(query)
         tables = entities.get("tables", [])
+
+        # Filter out management command keywords that might be mistakenly extracted
+        mgmt_keywords = {'tables', 'table', 'database', 'databases', 'schema', 'columns',
+                         'functions', 'cluster', 'operations', 'journal', 'extents'}
+        tables = [t for t in tables if t.lower() not in mgmt_keywords]
 
         # If no tables extracted, try fallback extraction
         if not tables:
@@ -339,13 +340,15 @@ async def _post_execution_learning_bg(query: str, cluster: str, database: str, _
                 # Fallback: extract table names using simpler pattern matching
                 table_pattern = r'\b([A-Za-z_][A-Za-z0-9_]*)\s*\|'
                 fallback_tables = re.findall(table_pattern, query)
+                # Filter out management keywords from fallback results
+                fallback_tables = [t for t in fallback_tables if t.lower() not in mgmt_keywords]
                 if fallback_tables:
                     tables = fallback_tables[:1]  # Take first table found
                     logger.debug("Fallback table extraction found: %s", tables)
                 else:
                     # Even without table extraction, store successful query globally
                     logger.debug("No tables extracted but storing successful query globally")
-                
+
                     memory_manager = get_memory_manager()
                     description = generate_query_description(query)
                     try:
@@ -360,7 +363,7 @@ async def _post_execution_learning_bg(query: str, cluster: str, database: str, _
                 return
 
         # Store successful query for each table involved
-    
+
         memory_manager = get_memory_manager()
         description = generate_query_description(query)
 
@@ -424,12 +427,15 @@ def get_knowledge_corpus():
         return get_memory_manager()
     except (ImportError, AttributeError, ValueError):
         # Fallback mock for tests if import fails
-        class MockCorpus:
+        class MockCorpus:  # pylint: disable=too-few-public-methods
+            """Mock corpus for testing when memory manager is unavailable."""
             def get_ai_context_for_query(self, _query: str) -> Dict[str, Any]:
+                """Return empty context for mock."""
                 return {}
 
             @property
             def memory_manager(self):
+                """Return None for mock memory manager."""
                 return None
         return MockCorpus()
 
