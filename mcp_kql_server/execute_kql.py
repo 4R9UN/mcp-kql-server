@@ -378,6 +378,9 @@ async def _post_execution_learning_bg(query: str, cluster: str, database: str, _
         # ENHANCED: Force schema discovery for all tables involved in the query
         await _ensure_schema_discovered(cluster, database, tables)
 
+        # Learn dynamic field patterns from the executed query
+        _learn_dynamic_field_patterns(query, cluster, database, tables)
+
     except (ValueError, TypeError, RuntimeError) as e:
         logger.debug("Background learning task failed: %s", e)
 
@@ -420,6 +423,81 @@ async def _ensure_schema_discovered(cluster_uri: str, database: str, tables: Lis
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             logger.warning("Auto schema discovery failed for %s: %s", table, e)
             # Continue with other tables even if one fails
+
+def _learn_dynamic_field_patterns(query: str, cluster: str, database: str, tables: List[str]):
+    """
+    Extract dynamic field access patterns from a successful query and update
+    stored schemas with newly discovered sub-fields.
+    """
+    try:
+        from .constants import DYNAMIC_ACCESS_PATTERNS
+
+        # Extract dynamic field references from the query
+        dynamic_refs = []
+
+        # Type-wrapped: tostring(Col.Field)
+        for match in re.finditer(DYNAMIC_ACCESS_PATTERNS["type_wrapped"], query):
+            full_path = match.group(1)
+            parts = full_path.split(".")
+            if len(parts) >= 2:
+                dynamic_refs.append({"base_col": parts[0], "sub_field": parts[1], "path": full_path})
+
+        # Dot notation: Col.Field
+        for match in re.finditer(DYNAMIC_ACCESS_PATTERNS["dot_notation"], query):
+            full_path = match.group(1)
+            parts = full_path.split(".")
+            if len(parts) >= 2:
+                # Skip KQL keywords and $left/$right
+                from .constants import KQL_RESERVED_WORDS
+                if parts[0].lower() not in {w.lower() for w in KQL_RESERVED_WORDS} and not parts[0].startswith("$"):
+                    dynamic_refs.append({"base_col": parts[0], "sub_field": parts[1], "path": full_path})
+
+        if not dynamic_refs:
+            return
+
+        memory_manager = get_memory_manager()
+        schemas = memory_manager._get_database_schema(cluster, database)
+
+        for ref in dynamic_refs:
+            base_col = ref["base_col"]
+            sub_field = ref["sub_field"]
+
+            # Find ALL tables that have this column (don't stop at first match)
+            for schema in schemas:
+                columns = schema.get("columns", {})
+                if base_col not in columns:
+                    continue
+
+                col_info = columns[base_col]
+                if not isinstance(col_info, dict):
+                    continue
+
+                col_type = (col_info.get("data_type") or "").lower()
+                if "dynamic" not in col_type:
+                    continue
+
+                # Add sub-field to dynamic_fields if not already present
+                dynamic_fields = col_info.get("dynamic_fields", {})
+                if sub_field not in dynamic_fields:
+                    dynamic_fields[sub_field] = {
+                        "type": "string",  # Default; will be refined on next schema discovery
+                        "path": f"{base_col}.{sub_field}",
+                        "sample": None,
+                        "source": "query_learning"
+                    }
+                    col_info["dynamic_fields"] = dynamic_fields
+
+                    # Update the stored schema
+                    table_name = schema.get("table", "")
+                    if table_name:
+                        memory_manager.store_schema(cluster, database, table_name, {"columns": columns})
+                        logger.info("Learned dynamic sub-field '%s.%s' from query for table '%s'",
+                                    base_col, sub_field, table_name)
+                # Continue checking other schemas — same column name may exist in multiple tables
+
+    except Exception as e:
+        logger.debug("Dynamic field pattern learning failed: %s", e)
+
 
 def get_knowledge_corpus():
     """Backward-compatible wrapper to memory.get_knowledge_corpus"""

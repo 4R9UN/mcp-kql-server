@@ -603,11 +603,46 @@ KQL_FUNCTIONS = [
     "pack",
     "bag_keys",
     "bag_merge",
+    "bag_has_key",
+    "bag_remove_keys",
     "treepath",
     "zip",
     "repeat",
     "range",
+    # Dynamic/JSON field functions
+    "parse_json",
+    "todynamic",
+    "getpath",
+    "extract_json",
+    "extractjson",
+    "toreal",
+    "mv-expand",
+    "mv-apply",
+    "bag_pack",
+    "pack_dictionary",
 ]
+
+# Dynamic field accessor functions - used for type-aware access to dynamic sub-fields
+DYNAMIC_TYPE_ACCESSORS = {
+    "string": "tostring",
+    "int": "toint",
+    "long": "tolong",
+    "real": "toreal",
+    "double": "todouble",
+    "datetime": "todatetime",
+    "timespan": "totimespan",
+    "bool": "tobool",
+    "boolean": "tobool",
+    "dynamic": None,  # No wrapper needed for nested dynamic
+}
+
+# Known KQL dynamic field access patterns (for validator)
+DYNAMIC_ACCESS_PATTERNS = {
+    "dot_notation": r'([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+)',
+    "bracket_notation": r'([A-Za-z_][\w]*)\[(["\'])(.+?)\2\]',
+    "mixed_notation": r'([A-Za-z_][\w]*)\.?\[(["\'])(.+?)\2\]',
+    "type_wrapped": r'(?:tostring|toint|tolong|toreal|todouble|todatetime|tobool)\s*\(\s*([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+)\s*\)',
+}
 
 # KQL query patterns for AI analysis
 KQL_QUERY_PATTERNS = {

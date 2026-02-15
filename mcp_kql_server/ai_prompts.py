@@ -40,6 +40,14 @@ CRITICAL RULES:
    - todatetime() for dates
    - Handle nulls with isnull(), isnotnull(), iff()
 
+6. **Dynamic (JSON) Fields**: Access nested properties correctly
+   - Dot notation: ColumnName.FieldName or ColumnName.Field.SubField
+   - Wrap in type conversion: tostring(Col.Field), toint(Col.Field), todatetime(Col.Field)
+   - For arrays: mv-expand Col | project tostring(Col.SubField)
+   - Use bag_keys(Col) to list available keys in a dynamic object
+   - Use parse_json(StringCol) to convert a JSON string to dynamic
+   - When dynamic sub-fields are listed in the schema, prefer using them directly
+
 OUTPUT FORMAT:
 Return ONLY the KQL query, nothing else. No explanations, no markdown, just the query."""
 
@@ -455,6 +463,60 @@ FEW_SHOT_EXAMPLES = [
             }
         },
         "query": "Alerts | join kind=inner Devices on DeviceId | project TimeGenerated, AlertId, Severity, DeviceName, OSPlatform | take 50"
+    },
+    {
+        "description": "Extract display names from dynamic TargetResources column",
+        "schema": {
+            "table": "AuditLogs",
+            "columns": {
+                "TimeGenerated": {"data_type": "datetime"},
+                "OperationName": {"data_type": "string"},
+                "TargetResources": {"data_type": "dynamic", "dynamic_fields": {
+                    "displayName": {"type": "string", "path": "TargetResources.displayName"},
+                    "id": {"type": "guid", "path": "TargetResources.id"},
+                    "type": {"type": "string", "path": "TargetResources.type"}
+                }},
+                "Result": {"data_type": "string"}
+            }
+        },
+        "query": "AuditLogs | where TimeGenerated > ago(1d) | mv-expand TargetResources | project TimeGenerated, OperationName, ResourceName=tostring(TargetResources.displayName), ResourceId=tostring(TargetResources.id) | take 100"
+    },
+    {
+        "description": "Summarize events by a nested dynamic field value",
+        "schema": {
+            "table": "SecurityEvent",
+            "columns": {
+                "TimeGenerated": {"data_type": "datetime"},
+                "EventID": {"data_type": "int"},
+                "EventData": {"data_type": "dynamic", "dynamic_fields": {
+                    "SubjectUserName": {"type": "string", "path": "EventData.SubjectUserName"},
+                    "TargetUserName": {"type": "string", "path": "EventData.TargetUserName"},
+                    "IpAddress": {"type": "string", "path": "EventData.IpAddress"}
+                }},
+                "Computer": {"data_type": "string"}
+            }
+        },
+        "query": "SecurityEvent | where TimeGenerated > ago(24h) | summarize Count=count() by TargetUser=tostring(EventData.TargetUserName) | top 10 by Count desc"
+    },
+    {
+        "description": "Join using a value extracted from a dynamic column",
+        "schema": {
+            "table": "AuditLogs",
+            "columns": {
+                "TimeGenerated": {"data_type": "datetime"},
+                "Properties": {"data_type": "dynamic", "dynamic_fields": {
+                    "DeviceId": {"type": "guid", "path": "Properties.DeviceId"},
+                    "UserId": {"type": "guid", "path": "Properties.UserId"}
+                }},
+                "OperationName": {"data_type": "string"}
+            },
+            "table2": "Devices",
+            "columns2": {
+                "DeviceId": {"data_type": "string"},
+                "DeviceName": {"data_type": "string"}
+            }
+        },
+        "query": "AuditLogs | extend DeviceId=tostring(Properties.DeviceId) | join kind=inner Devices on DeviceId | project TimeGenerated, OperationName, DeviceName | take 50"
     }
 ]
 
@@ -507,6 +569,16 @@ def build_generation_prompt(
             if description:
                 col_line += f": {description[:50]}"
             prompt_parts.append(col_line)
+
+            # For dynamic columns, list known sub-fields
+            dynamic_fields = col_info.get("dynamic_fields")
+            if dynamic_fields and data_type.lower() == "dynamic":
+                sf_parts = []
+                for sf_name, sf_info in list(dynamic_fields.items())[:8]:
+                    sf_type = sf_info.get("type", "string") if isinstance(sf_info, dict) else "string"
+                    sf_parts.append(f"{sf_name} ({sf_type})")
+                prompt_parts.append(f"    Sub-fields: {', '.join(sf_parts)}")
+                prompt_parts.append(f"    Access via: tostring({col_name}.fieldName) or mv-expand {col_name}")
 
         if len(schema["columns"]) > 20:
             prompt_parts.append(f"  ... and {len(schema['columns']) - 20} more columns")

@@ -43,7 +43,9 @@ TOON_TYPE_MAP = {
     'bool': 'b',
     'boolean': 'b',
     'dynamic': 'dyn',
-    'guid': 'g'
+    'guid': 'g',
+    'array': 'arr',
+    'object': 'obj'
 }
 
 class SemanticSearch:
@@ -233,9 +235,20 @@ class MemoryManager:
                     normalized_cols[col] = {"data_type": "string"}
             columns = normalized_cols
 
-        # Generate embedding for table (name + column names)
+        # Generate embedding for table (name + column names + dynamic sub-field names)
         col_names = " ".join(columns.keys())
-        embedding = self.semantic_search.encode(f"Table {table} contains columns: {col_names}")
+        embedding_text = f"Table {table} contains columns: {col_names}"
+
+        # Include dynamic sub-field names for richer semantic search
+        dynamic_paths = []
+        for col_name, col_def in columns.items():
+            if isinstance(col_def, dict) and col_def.get("dynamic_fields"):
+                for field_name in col_def["dynamic_fields"]:
+                    dynamic_paths.append(f"{col_name}.{field_name}")
+        if dynamic_paths:
+            embedding_text += f". Dynamic fields: {' '.join(dynamic_paths)}"
+
+        embedding = self.semantic_search.encode(embedding_text)
 
         with self._lock, sqlite3.connect(self.db_path) as conn:
             # Check if columns exist (migration for existing DBs)
@@ -402,13 +415,13 @@ class MemoryManager:
                     return row[0]
         return None
 
-    def store_join_hint(self, table1: str, table2: str, condition: str):
+    def store_join_hint(self, table1: str, table2: str, condition: str, confidence: float = 1.0):
         """Store a discovered join relationship."""
         with self._lock, sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO join_hints (table1, table2, join_condition, confidence, last_used)
-                VALUES (?, ?, ?, 1.0, ?)
-            """, (table1, table2, condition, datetime.now().isoformat()))
+                VALUES (?, ?, ?, ?, ?)
+            """, (table1, table2, condition, confidence, datetime.now().isoformat()))
 
     def get_join_hints(self, tables: List[str]) -> List[str]:
         """Get join hints relevant to the provided tables."""
@@ -493,7 +506,18 @@ class MemoryManager:
 
                     # Map to short type
                     short_type = TOON_TYPE_MAP.get(col_type.lower(), 's')
-                    cols.append(f"{col_name}:{short_type}")
+
+                    # For dynamic columns with known sub-fields, append them
+                    dynamic_fields = col_def.get("dynamic_fields") if isinstance(col_def, dict) else None
+                    if short_type == 'dyn' and dynamic_fields:
+                        sub_parts = []
+                        for sf_name, sf_info in list(dynamic_fields.items())[:10]:  # Limit to 10 sub-fields
+                            sf_type = sf_info.get("type", "s") if isinstance(sf_info, dict) else "s"
+                            sf_short = TOON_TYPE_MAP.get(sf_type, sf_type[:3])
+                            sub_parts.append(f"{sf_name}:{sf_short}")
+                        cols.append(f"{col_name}:dyn{{{','.join(sub_parts)}}}")
+                    else:
+                        cols.append(f"{col_name}:{short_type}")
 
                 lines.append(f"{table}({', '.join(cols)})")
         else:

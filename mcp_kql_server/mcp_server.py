@@ -391,26 +391,48 @@ async def _generate_kql_from_natural_language(
                 sq_words = [w for w in sq_words if w not in reserved_words_lower]
                 nl_words.update(sq_words)
 
-        # 8. Match ONLY against schema columns (strict validation)
+        # 8. Match against schema columns AND dynamic sub-fields (strict validation)
         valid_columns = []
+        dynamic_projections = []  # For dynamic sub-field access expressions
+
+        # Build a map of dynamic sub-field names -> (parent_col, field_info)
+        from .constants import DYNAMIC_TYPE_ACCESSORS
+        dynamic_field_map = {}  # field_name_lower -> (parent_col, field_name, field_type)
+        for col_name, col_info in schema_columns.items():
+            if isinstance(col_info, dict) and col_info.get("dynamic_fields"):
+                for sf_name, sf_info in col_info["dynamic_fields"].items():
+                    sf_type = sf_info.get("type", "string") if isinstance(sf_info, dict) else "string"
+                    dynamic_field_map[sf_name.lower()] = (col_name, sf_name, sf_type)
+
         for word in nl_words:
             if word in col_map:
                 actual_col = col_map[word]
                 # Double-check the column exists in schema (defensive)
                 if actual_col in schema_columns:
                     valid_columns.append(actual_col)
+            elif word in dynamic_field_map:
+                # Match against dynamic sub-fields
+                parent_col, sf_name, sf_type = dynamic_field_map[word]
+                accessor = DYNAMIC_TYPE_ACCESSORS.get(sf_type, "tostring")
+                if accessor:
+                    expr = f"{accessor}({parent_col}.{sf_name})"
+                else:
+                    expr = f"{parent_col}.{sf_name}"
+                dynamic_projections.append(expr)
 
         # Remove duplicates while preserving order
         valid_columns = list(dict.fromkeys(valid_columns))
+        dynamic_projections = list(dict.fromkeys(dynamic_projections))
 
         # 9. Build query using ONLY validated schema data
-        if valid_columns:
+        if valid_columns or dynamic_projections:
             # Limit to reasonable number of columns
             project_cols = valid_columns[:12]
-            project_clause = ", ".join(bracket_if_needed(c) for c in project_cols)
+            all_projections = [bracket_if_needed(c) for c in project_cols] + dynamic_projections[:4]
+            project_clause = ", ".join(all_projections)
             final_query = f"{bracket_if_needed(target_table)} | project {project_clause} | take 10"
             method = "schema_memory_validated"
-            columns_used = project_cols
+            columns_used = project_cols + [p for p in dynamic_projections[:4]]
         else:
             # Safe fallback: project first N columns from schema (NOT all columns)
             # This ensures we always use schema-validated columns
@@ -487,6 +509,7 @@ async def schema_memory(
     - "list_tables": List all tables in a database (START HERE)
     - "discover": Discover and cache schema for a specific table
     - "get_context": Get AI context for tables based on natural language query
+    - "dynamic_fields": Show discovered dynamic (JSON) sub-fields and join hints for a table
     - "refresh_schema": Proactively refresh all schemas for a database
     - "get_stats": Get memory and cache statistics
     - "clear_cache": Clear all cached schemas
@@ -544,6 +567,13 @@ async def schema_memory(
             return await _schema_clear_cache_operation()
         elif operation == "get_stats":
             return await _schema_get_stats_operation()
+        elif operation == "dynamic_fields":
+            if not cluster_url or not database:
+                return json.dumps({
+                    "success": False,
+                    "error": "cluster_url and database are required for dynamic_fields operation"
+                })
+            return await _schema_dynamic_fields_operation(cluster_url, database, table_name)
         elif operation == "refresh_schema":
             if not cluster_url or not database:
                 return json.dumps({
@@ -555,7 +585,7 @@ async def schema_memory(
             return json.dumps({
                 "success": False,
                 "error": f"Unknown operation: {operation}",
-                "available_operations": ["discover", "list_tables", "get_context", "generate_report", "clear_cache", "get_stats", "refresh_schema"]
+                "available_operations": ["discover", "list_tables", "get_context", "dynamic_fields", "generate_report", "clear_cache", "get_stats", "refresh_schema"]
             })
 
     except (ValueError, KeyError, RuntimeError) as e:
@@ -577,6 +607,50 @@ def _get_session_queries(_session_id: str, memory) -> List[Dict]:
         return all_queries
     except (ValueError, RuntimeError, AttributeError):
         return []
+
+
+async def _schema_dynamic_fields_operation(cluster_url: str, database: str, table_name: Optional[str] = None) -> str:
+    """Show discovered dynamic sub-fields and related join hints for a table or all tables."""
+    schemas = memory_manager._get_database_schema(cluster_url, database)
+
+    results = []
+    for schema in schemas:
+        tbl = schema.get("table", "")
+        if table_name and tbl != table_name:
+            continue
+
+        columns = schema.get("columns", {})
+        dynamic_cols = {}
+        for col_name, col_info in columns.items():
+            if not isinstance(col_info, dict):
+                continue
+            col_type = (col_info.get("data_type") or "").lower()
+            if "dynamic" not in col_type:
+                continue
+            dynamic_fields = col_info.get("dynamic_fields", {})
+            dynamic_cols[col_name] = {
+                "sub_fields": dynamic_fields,
+                "sub_field_count": len(dynamic_fields),
+            }
+
+        if dynamic_cols:
+            results.append({
+                "table": tbl,
+                "dynamic_columns": dynamic_cols
+            })
+
+    # Get join hints involving these tables
+    table_names = [r["table"] for r in results] if not table_name else [table_name]
+    join_hints = memory_manager.get_join_hints(table_names) if table_names else []
+
+    return json.dumps({
+        "success": True,
+        "operation": "dynamic_fields",
+        "tables_with_dynamic_columns": len(results),
+        "results": results,
+        "join_hints": join_hints,
+        "note": "Use operation='discover' to refresh dynamic field discovery for a specific table."
+    }, default=str)
 
 
 def _generate_executive_summary(session_queries: List[Dict]) -> str:

@@ -766,6 +766,9 @@ class SchemaManager:
 
     def _create_enhanced_schema_object(self, cluster: str, database: str, table: str, columns: dict, method: str) -> Dict[str, Any]:
         """Create enhanced schema object with proper metadata."""
+        # Enrich dynamic columns with sub-field introspection
+        self._enrich_dynamic_columns(table, columns, cluster, database)
+
         schema_obj = {
             "table_name": table,
             "columns": columns,
@@ -1118,6 +1121,224 @@ class SchemaManager:
             tags.append("UNKNOWN_TYPE")
 
         return tags
+
+    def _introspect_dynamic_fields(self, table: str, column_name: str, sample_values: List[str], max_depth: int = 3) -> Dict[str, Any]:
+        """
+        Introspect a dynamic column's sample values to extract sub-field schemas.
+
+        Parses JSON sample data and builds a map of sub-fields with their types,
+        access paths, and sample values. Handles nested objects up to max_depth.
+
+        Returns:
+            Dict of sub-field name -> {"type", "path", "sample", "nested"(optional)}
+        """
+        sub_fields: Dict[str, Any] = {}
+
+        if not sample_values:
+            return sub_fields
+
+        for raw_value in sample_values:
+            parsed = self._parse_dynamic_value(raw_value)
+            if parsed is None:
+                continue
+
+            if isinstance(parsed, dict):
+                self._extract_sub_fields(parsed, column_name, sub_fields, depth=0, max_depth=max_depth)
+            elif isinstance(parsed, list) and parsed:
+                # For arrays, inspect first element
+                first_elem = parsed[0]
+                if isinstance(first_elem, dict):
+                    self._extract_sub_fields(first_elem, f"{column_name}[0]", sub_fields, depth=0, max_depth=max_depth)
+
+        return sub_fields
+
+    def _parse_dynamic_value(self, raw_value: str) -> Any:
+        """Parse a dynamic column value from its string representation."""
+        if not raw_value or raw_value in ('', 'None', 'null', '{}', '[]'):
+            return None
+
+        # Already a dict/list (from Kusto SDK deserialization)
+        if isinstance(raw_value, (dict, list)):
+            return raw_value
+
+        # Try JSON parse
+        try:
+            return json.loads(raw_value)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Try stripping outer quotes
+        stripped = raw_value.strip().strip('"').strip("'")
+        if stripped != raw_value:
+            try:
+                return json.loads(stripped)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return None
+
+    def _extract_sub_fields(self, obj: dict, parent_path: str, sub_fields: Dict[str, Any],
+                            depth: int, max_depth: int) -> None:
+        """Recursively extract sub-fields from a parsed dynamic object."""
+        if depth >= max_depth or not isinstance(obj, dict):
+            return
+
+        for key, value in obj.items():
+            field_path = f"{parent_path}.{key}"
+            field_type = self._infer_dynamic_field_type(value)
+
+            if key not in sub_fields:
+                sub_fields[key] = {
+                    "type": field_type,
+                    "path": field_path,
+                    "sample": str(value)[:100] if value is not None else None,
+                }
+            else:
+                # Update sample if we have a non-null value and existing is null
+                existing = sub_fields[key]
+                if existing.get("sample") is None and value is not None:
+                    existing["sample"] = str(value)[:100]
+
+            # Recurse into nested objects
+            if isinstance(value, dict) and depth + 1 < max_depth:
+                nested_fields: Dict[str, Any] = {}
+                self._extract_sub_fields(value, field_path, nested_fields, depth + 1, max_depth)
+                if nested_fields:
+                    sub_fields[key]["nested"] = nested_fields
+                    sub_fields[key]["type"] = "object"
+
+            # For arrays, inspect first element
+            elif isinstance(value, list) and value and depth + 1 < max_depth:
+                sub_fields[key]["type"] = "array"
+                first_elem = value[0]
+                if isinstance(first_elem, dict):
+                    nested_fields = {}
+                    self._extract_sub_fields(first_elem, f"{field_path}[0]", nested_fields, depth + 1, max_depth)
+                    if nested_fields:
+                        sub_fields[key]["element_fields"] = nested_fields
+
+    def _infer_dynamic_field_type(self, value: Any) -> str:
+        """Infer the type of a value within a dynamic field."""
+        if value is None:
+            return "string"  # Default assumption
+        if isinstance(value, bool):
+            return "bool"
+        if isinstance(value, int):
+            return "long"
+        if isinstance(value, float):
+            return "real"
+        if isinstance(value, dict):
+            return "object"
+        if isinstance(value, list):
+            return "array"
+        # String - check for datetime/guid patterns
+        value_str = str(value)
+        if re.match(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', value_str):
+            return "datetime"
+        if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', value_str, re.IGNORECASE):
+            return "guid"
+        return "string"
+
+    def _discover_dynamic_join_hints(self, table: str, column_name: str,
+                                      sub_fields: Dict[str, Any],
+                                      cluster: str, database: str) -> List[Dict[str, Any]]:
+        """
+        Check if any dynamic sub-fields could be used to join with other tables.
+        Looks for sub-fields whose names match:
+        1. Top-level columns in other tables
+        2. Dynamic sub-fields in other tables' dynamic columns (bidirectional)
+        """
+        join_hints = []
+        schemas = self.memory_manager._get_database_schema(cluster, database)
+
+        for schema in schemas:
+            other_table = schema.get("table", "")
+            if other_table == table:
+                continue
+            columns = schema.get("columns", {})
+            if not isinstance(columns, dict):
+                continue
+
+            # Build match targets: top-level columns + dynamic sub-fields
+            # Each entry: field_lower -> (display_name, access_expr, is_dynamic_subfield)
+            match_targets: Dict[str, Tuple[str, str, bool]] = {}
+
+            for col_name, col_info in columns.items():
+                # Top-level column
+                match_targets[col_name.lower()] = (col_name, f"{other_table}.{col_name}", False)
+
+                # Dynamic sub-fields of this column
+                if isinstance(col_info, dict) and col_info.get("dynamic_fields"):
+                    for sf_name in col_info["dynamic_fields"]:
+                        match_targets[sf_name.lower()] = (
+                            sf_name,
+                            f"tostring({col_name}.{sf_name})",
+                            True
+                        )
+
+            # Check each of our sub-fields against the match targets
+            for field_name, field_info in sub_fields.items():
+                field_lower = field_name.lower()
+                if field_lower not in match_targets:
+                    continue
+
+                matched_name, matched_expr, is_dynamic_match = match_targets[field_lower]
+
+                # Determine confidence
+                is_id_like = (
+                    field_lower.endswith('id') or
+                    field_lower.endswith('_id') or
+                    field_info.get("type") == "guid" or
+                    (self._looks_like_identifiers([field_info.get("sample", "")]) if field_info.get("sample") else False)
+                )
+                confidence = 0.9 if is_id_like else 0.7
+
+                left_expr = f"tostring({column_name}.{field_name})"
+                join_condition = f"{left_expr} == {matched_expr}"
+
+                join_hints.append({
+                    "table1": table,
+                    "table2": other_table,
+                    "join_condition": join_condition,
+                    "confidence": confidence,
+                    "source": "dynamic_field_discovery",
+                    "bidirectional": is_dynamic_match
+                })
+
+        return join_hints
+
+    def _enrich_dynamic_columns(self, table: str, columns: Dict[str, Any],
+                                 cluster: str, database: str) -> None:
+        """
+        For each dynamic column, introspect sample values and store sub-field metadata.
+        Also discovers join hints from dynamic sub-fields.
+        """
+        for col_name, col_info in columns.items():
+            col_type = (col_info.get("data_type") or col_info.get("column_type") or "").lower()
+            if "dynamic" not in col_type:
+                continue
+
+            sample_values = col_info.get("sample_values", [])
+            if not sample_values:
+                continue
+
+            # Introspect sub-fields from sample data
+            sub_fields = self._introspect_dynamic_fields(table, col_name, sample_values)
+            if sub_fields:
+                col_info["dynamic_fields"] = sub_fields
+                logger.info("Discovered %d dynamic sub-fields for %s.%s", len(sub_fields), table, col_name)
+
+                # Try to discover join hints from sub-fields
+                try:
+                    hints = self._discover_dynamic_join_hints(table, col_name, sub_fields, cluster, database)
+                    for hint in hints:
+                        self.memory_manager.store_join_hint(
+                            hint["table1"], hint["table2"],
+                            hint["join_condition"], hint["confidence"]
+                        )
+                        logger.info("Discovered dynamic join hint: %s", hint["join_condition"])
+                except Exception as e:
+                    logger.debug("Failed to discover dynamic join hints for %s.%s: %s", table, col_name, e)
 
     async def get_database_schema(self, cluster: str, database: str, validate_auth: bool = False) -> Dict[str, Any]:
         """
