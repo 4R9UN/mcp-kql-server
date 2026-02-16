@@ -24,7 +24,7 @@ FastMCP Server Framework
     |
     +-- KQLValidator        (pre-execution query validation)
     +-- SchemaManager       (live schema discovery, multi-strategy)
-    +-- MemoryManager       (SQLite + embeddings + CAG)
+    +-- MemoryManager       (PostgreSQL + pgvector + CAG)
     +-- SemanticSearch      (sentence-transformers, all-MiniLM-L6-v2)
     |
     v
@@ -39,7 +39,7 @@ Azure Data Explorer (Kusto)
 | File | Purpose |
 |---|---|
 | `mcp_server.py` | FastMCP server, defines the 2 MCP tools, NL2KQL generation, report generation |
-| `memory.py` | SQLite-backed memory system with semantic search, CAG, TOON formatting |
+| `memory.py` | PostgreSQL + pgvector memory system with semantic search, CAG, TOON formatting |
 | `utils.py` | SchemaManager (live discovery with 3 strategies), SchemaDiscovery, ErrorHandler, retry logic, query entity extraction |
 | `execute_kql.py` | Core KQL execution against Kusto, background learning loop, client caching |
 | `kql_validator.py` | Pre-execution query validation (tables, columns, operator syntax) |
@@ -104,25 +104,27 @@ The schema management and intelligence tool. Operations:
 
 ## Key Subsystems
 
-### SQLite Memory System (`memory.py`)
+### PostgreSQL + pgvector Memory System (`memory.py`)
 
-The memory manager stores everything in a single SQLite database (WAL mode for concurrency) at a platform-specific path (`~/.local/share/KQL_MCP/kql_memory.db` on Unix, `%APPDATA%\KQL_MCP\` on Windows).
+The memory manager stores everything in PostgreSQL with pgvector for native vector similarity search. Tables are prefixed with `kql_mcp_` to avoid collision with other applications sharing the same database. Connection is managed via `psycopg2.pool.ThreadedConnectionPool`. Configuration is read from environment variables (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_DATABASE`) via `POSTGRES_CONFIG` in `constants.py`.
 
-**5 Tables:**
+**5 Tables (all prefixed `kql_mcp_`):**
 
 | Table | Purpose |
 |---|---|
-| `schemas` | Table definitions with column JSON and embedding vectors |
-| `queries` | Successful queries with embeddings for similarity search |
-| `join_hints` | Discovered table relationships (table1 joins table2 on condition) |
-| `query_cache` | Result caching with SHA256 hash keys and TTL |
-| `learning_events` | Execution learning data for analytics |
+| `kql_mcp_schemas` | Table definitions with column JSON and `vector(384)` embeddings, composite PK (cluster, database, table_name) |
+| `kql_mcp_queries` | Successful queries with `vector(384)` embeddings for similarity search |
+| `kql_mcp_join_hints` | Discovered table relationships (table1 joins table2 on condition) |
+| `kql_mcp_query_cache` | Result caching with SHA256 hash keys and TTL via SQL interval |
+| `kql_mcp_learning_events` | Execution learning data for analytics |
 
-**Semantic Search** (`memory.py:49-107`): Uses `sentence-transformers` with the `all-MiniLM-L6-v2` model (singleton, lazy-loaded, preloaded in background thread). Generates 384-dimensional embeddings stored as raw bytes in SQLite. Similarity is computed via cosine similarity using numpy.
+**Semantic Search** (`memory.py:60-115`): Uses `sentence-transformers` with the `all-MiniLM-L6-v2` model (singleton, lazy-loaded, preloaded in background thread). Generates 384-dimensional embeddings stored as `vector(384)` columns in PostgreSQL. Similarity search uses pgvector's `<=>` cosine distance operator with HNSW indexes for fast server-side ranking.
 
-**CAG (Context Augmented Generation)** (`memory.py:454-516`): Builds compact context strings in TOON (Token-Oriented Object Notation) format combining schemas, similar queries, and join hints. TOON compresses data types (`string` -> `s`, `datetime` -> `dt`, etc.) to minimize token usage.
+**CAG (Context Augmented Generation)** (`memory.py:561-634`): Builds compact context strings in TOON (Token-Oriented Object Notation) format combining schemas, similar queries, and join hints. TOON compresses data types (`string` -> `s`, `datetime` -> `dt`, etc.) to minimize token usage.
 
-**In-memory schema cache** (`memory.py:432-452`): 5-minute TTL dictionary cache on top of SQLite to avoid repeated DB reads.
+**In-memory schema cache** (`memory.py:534-559`): 5-minute TTL dictionary cache on top of PostgreSQL to avoid repeated DB reads.
+
+**Graceful degradation**: If PostgreSQL is unavailable, the server starts with `_db_available = False` and all memory operations return empty results. Query execution still works against Kusto.
 
 ### Schema Discovery (`utils.py:275-766`)
 
@@ -132,7 +134,7 @@ The `SchemaManager` class is the single source of truth for live schema discover
 2. **Strategy 2** - `<table> | getschema` (backup, works on more table types)
 3. **Strategy 3** - `<table> | take 2` then infer schema from sample data (last resort)
 
-Each strategy also fetches sample data (`| take 2`) for enhanced column descriptions. After discovery, the schema is stored in SQLite via `MemoryManager.store_schema()` with an embedding generated from the table name and column names.
+Each strategy also fetches sample data (`| take 2`) for enhanced column descriptions. After discovery, the schema is stored in PostgreSQL via `MemoryManager.store_schema()` with a `vector(384)` embedding generated from the table name and column names.
 
 **Column enrichment** (`utils.py:907-1120`): Each discovered column gets:
 - A semantic description generated from data patterns (not hardcoded keywords)
@@ -225,7 +227,7 @@ A "simple" Kusto MCP server would typically just proxy KQL queries to Azure Data
 
 ### 1. Schema Memory + Semantic Search
 
-A simple server has no memory between queries. This server persists schemas, queries, and join hints in SQLite with vector embeddings. When a user asks about data, it can semantically match their intent to the right tables without the user knowing exact table names.
+A simple server has no memory between queries. This server persists schemas, queries, and join hints in PostgreSQL with pgvector embeddings. When a user asks about data, it can semantically match their intent to the right tables without the user knowing exact table names.
 
 ### 2. Pre-Execution Validation
 
@@ -355,6 +357,8 @@ Return Results to Client
 | `azure-kusto-data` | Kusto client SDK |
 | `azure-identity` | Azure CLI credential |
 | `azure-cli` | Authentication backend |
+| `psycopg2-binary` | PostgreSQL adapter for Python |
+| `pgvector` | pgvector support for psycopg2 (vector type registration) |
 | `sentence-transformers` | Embedding generation for semantic search |
 | `scikit-learn` | ML utilities |
 | `numpy` | Vector operations for similarity |
@@ -369,7 +373,7 @@ Return Results to Client
 
 This is not a simple Kusto proxy. It is an intelligent data access layer that:
 
-- **Remembers** schemas and query patterns in SQLite with vector embeddings
+- **Remembers** schemas and query patterns in PostgreSQL with pgvector embeddings
 - **Validates** queries against real schemas before execution
 - **Generates** KQL from natural language using only schema-validated columns
 - **Learns** from every query to improve future interactions

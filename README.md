@@ -140,6 +140,7 @@ graph TD
 - Python 3.10 or higher
 - [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-windows?view=azure-cli-latest&pivots=msi) installed and authenticated (`az login`)
 - Access to Azure Data Explorer cluster(s)
+- PostgreSQL database with [pgvector](https://github.com/pgvector/pgvector) extension (for schema memory persistence)
 
 ## 🚀 One-Command Installation
 
@@ -157,10 +158,10 @@ pip install mcp-kql-server
 ```
 
 **That's it!** The server automatically:
-- ✅ Sets up memory directories in `%APPDATA%\KQL_MCP` (Windows) or `~/.local/share/KQL_MCP` (Linux/Mac)
+- ✅ Connects to PostgreSQL for persistent schema memory (configure via `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_DATABASE` env vars)
 - ✅ Configures optimal defaults for production use
 - ✅ Suppresses verbose Azure SDK logs
-- ✅ No environment variables required
+- ✅ Gracefully degrades if PostgreSQL is unavailable (queries still work, memory features disabled)
 
 
 ## 📱 MCP Client Configuration
@@ -256,7 +257,7 @@ python -m mcp_kql_server
 ```
 
 The server starts immediately with:
-- 📁 **Auto-created memory path**: `%APPDATA%\KQL_MCP\cluster_memory`
+- 💾 **Persistent memory**: Connects to PostgreSQL with pgvector for schema and query memory
 - 🔧 **Optimized defaults**: No configuration files needed
 - 🔐 **Secure setup**: Uses your existing Azure CLI credentials
 
@@ -443,7 +444,7 @@ mcp-kql-server/
 
 - **Azure CLI Authentication**: Leverages your existing Azure device login
 - **No Credential Storage**: Server doesn't store authentication tokens
-- **Local Memory**: Schema cache stored locally, not transmitted
+- **Persistent Memory**: Schema cache stored in PostgreSQL, tables prefixed with `kql_mcp_` to avoid collisions
 
 ## 🐛 Troubleshooting
 
@@ -457,13 +458,11 @@ mcp-kql-server/
 
 2. **Memory Issues**
    ```bash
-   # The memory cache is now managed automatically. If you suspect issues,
-   # you can clear the cache directory, and it will be rebuilt on the next query.
-   # Windows:
-   rmdir /s /q "%APPDATA%\KQL_MCP\unified_memory.json"
-   
-   # macOS/Linux:
-   rm -rf ~/.local/share/KQL_MCP/cluster_memory
+   # Memory is stored in PostgreSQL. If you suspect issues, check the connection:
+   psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_DATABASE -c "SELECT count(*) FROM kql_mcp_schemas;"
+
+   # To clear all cached schemas:
+   psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_DATABASE -c "TRUNCATE kql_mcp_schemas, kql_mcp_queries, kql_mcp_query_cache;"
    ```
 
 3. **Connection Timeouts**
