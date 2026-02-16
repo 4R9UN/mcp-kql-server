@@ -37,6 +37,9 @@ COPY --from=builder /app/wheels /wheels
 # Install dependencies
 RUN pip install --no-cache /wheels/*
 
+# Pre-download the sentence-transformers model to avoid cold-start delay
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 # Copy application code
 COPY . .
 
@@ -45,9 +48,6 @@ RUN chown -R mcpuser:mcpuser /app
 
 # Switch to non-root user
 USER mcpuser
-
-# Pre-download the sentence-transformers model as mcpuser to avoid cold-start delay
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 # Default transport settings for container deployment
 ENV MCP_TRANSPORT=sse
