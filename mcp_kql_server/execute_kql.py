@@ -10,6 +10,7 @@ Email: arjuntrivedi42@yahoo.com
 
 import asyncio
 import logging
+import os
 import re
 import time
 import json
@@ -107,7 +108,16 @@ def _get_kusto_client(cluster_url: str) -> KustoClient:
 
     if normalized_url not in _client_cache:
         logger.info("Creating new Kusto client for %s", normalized_url)
-        kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(normalized_url)
+        from .kql_auth import get_auth_mode
+        if get_auth_mode() == "service_principal":
+            kcsb = KustoConnectionStringBuilder.with_aad_application_key_authentication(
+                normalized_url,
+                os.environ["KUSTO_CLIENT_ID"],
+                os.environ["KUSTO_CLIENT_SECRET"],
+                os.environ["KUSTO_TENANT_ID"],
+            )
+        else:
+            kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(normalized_url)
         _client_cache[normalized_url] = KustoClient(kcsb)
 
     return _client_cache[normalized_url]

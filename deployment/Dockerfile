@@ -24,7 +24,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Create a non-root user
-RUN groupadd -r mcpuser && useradd -r -g mcpuser mcpuser
+RUN groupadd -r mcpuser && useradd -r -g mcpuser -m mcpuser
 
 # Install runtime dependencies (curl for healthchecks if needed)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -46,13 +46,13 @@ RUN chown -R mcpuser:mcpuser /app
 # Switch to non-root user
 USER mcpuser
 
-# Expose port (Container Apps defaults to 80 or 8080, fastmcp uses SSE usually on a configurable port)
-# We'll assume standard MCP port or configure via env var
-ENV PORT=8000
+# Pre-download the sentence-transformers model as mcpuser to avoid cold-start delay
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# Default transport settings for container deployment
+ENV MCP_TRANSPORT=sse
+ENV MCP_HOST=0.0.0.0
+ENV MCP_PORT=8000
 EXPOSE 8000
 
-# Run the server
-# Assuming the entry point is via the 'mcp-kql-server' command installed by pip (if setup.py exists)
-# OR running the module directly.
-# Based on project structure, we run the module.
-CMD ["python", "-m", "mcp_kql_server.main"]
+CMD ["python", "-m", "mcp_kql_server"]

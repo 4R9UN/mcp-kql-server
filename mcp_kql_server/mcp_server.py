@@ -1151,8 +1151,15 @@ def main():
         logger.info("Available tools: execute_kql_query, schema_memory")
         logger.info("=" * 60)
 
-        # Use FastMCP's built-in stdio transport
-        mcp.run()
+        # Select transport based on environment (default: stdio for local dev)
+        transport = os.environ.get("MCP_TRANSPORT", "stdio")
+        if transport in ("sse", "streamable-http"):
+            host = os.environ.get("MCP_HOST", "0.0.0.0")
+            port = int(os.environ.get("MCP_PORT", "8000"))
+            logger.info("Starting MCP server with %s transport on %s:%d", transport, host, port)
+            mcp.run(transport=transport, host=host, port=port)
+        else:
+            mcp.run()
     except (RuntimeError, OSError, ImportError) as e:
         logger.error("[ERROR] Failed to start server: %s", e)
 

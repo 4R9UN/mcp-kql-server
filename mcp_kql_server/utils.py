@@ -377,7 +377,16 @@ class SchemaManager:
             for attempt in range(max_retries + 1):  # +1 for initial attempt
                 try:
                     # Create connection with timeout configuration
-                    kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
+                    from .kql_auth import get_auth_mode
+                    if get_auth_mode() == "service_principal":
+                        kcsb = KustoConnectionStringBuilder.with_aad_application_key_authentication(
+                            cluster_url,
+                            os.environ["KUSTO_CLIENT_ID"],
+                            os.environ["KUSTO_CLIENT_SECRET"],
+                            os.environ["KUSTO_TENANT_ID"],
+                        )
+                    else:
+                        kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
 
                     with KustoClient(kcsb) as client:
                         # Execute query/management command
@@ -468,7 +477,16 @@ class SchemaManager:
         """Test actual cluster access with a minimal query."""
         try:
             from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
-            kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
+            from .kql_auth import get_auth_mode
+            if get_auth_mode() == "service_principal":
+                kcsb = KustoConnectionStringBuilder.with_aad_application_key_authentication(
+                    cluster_url,
+                    os.environ["KUSTO_CLIENT_ID"],
+                    os.environ["KUSTO_CLIENT_SECRET"],
+                    os.environ["KUSTO_TENANT_ID"],
+                )
+            else:
+                kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
 
             with KustoClient(kcsb) as client:
                 # Use a lightweight query that should work on any cluster
@@ -1411,7 +1429,16 @@ class SchemaManager:
 
             # Step 2: Test database-specific access
             try:
-                kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
+                from .kql_auth import get_auth_mode
+                if get_auth_mode() == "service_principal":
+                    kcsb = KustoConnectionStringBuilder.with_aad_application_key_authentication(
+                        cluster_url,
+                        os.environ["KUSTO_CLIENT_ID"],
+                        os.environ["KUSTO_CLIENT_SECRET"],
+                        os.environ["KUSTO_TENANT_ID"],
+                    )
+                else:
+                    kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
 
                 with KustoClient(kcsb) as client:
                     # Test database access with a minimal query
