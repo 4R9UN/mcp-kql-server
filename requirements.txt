@@ -16,6 +16,10 @@ sentence-transformers>=2.0.0,<6.0.0
 scikit-learn>=1.0.0,<2.0.0
 numpy>=1.21.0,<3.0.0
 
+# PostgreSQL + pgvector (memory persistence)
+psycopg2-binary>=2.9.0,<3.0.0
+pgvector>=0.3.0,<1.0.0
+
 # Networking and HTTP
 httpx>=0.25.0,<1.0.0
 requests>=2.31.0,<3.0.0

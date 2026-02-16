@@ -51,23 +51,15 @@ logger = logging.getLogger(__name__)
 
 
 def _setup_memory_directories():
-    """Initialize unified data directory and corpus file on import."""
+    """Initialize memory manager on import."""
     try:
-        from .constants import get_data_dir
         from .memory import get_memory_manager
 
-        # Ensure unified data dir exists
-        data_dir = get_data_dir()
-        data_dir.mkdir(parents=True, exist_ok=True)
-
-        # Initialize unified corpus (creates knowledge_corpus.json if missing)
         mm = get_memory_manager()
         mm.save_corpus()
-        # Use canonical attribute name `memory_path` directly; avoid deprecated alias `corpus_path`
-        logger.info("Unified memory initialized at: %s", mm.memory_path)
+        logger.info("Memory initialized at: %s", mm.memory_path)
     except (OSError, RuntimeError, ImportError) as e:
-        # Narrow exception types to avoid masking unexpected failures
-        logger.debug("Unified memory setup skipped: %s", e)
+        logger.debug("Memory setup skipped: %s", e)
 
 
 def _suppress_azure_logs():

@@ -5,7 +5,15 @@ Author: Arjun Trivedi
 Email: arjuntrivedi42@yahoo.com
 """
 
+import os
 import unittest
+
+# Set test DB env vars (can be overridden by CI environment)
+os.environ.setdefault("DB_HOST", "localhost")
+os.environ.setdefault("DB_PORT", "5432")
+os.environ.setdefault("DB_USER", "postgres")
+os.environ.setdefault("DB_PASSWORD", "postgres")
+os.environ.setdefault("DB_DATABASE", "postgres")
 
 from mcp_kql_server.memory import (
     get_memory_manager,
@@ -36,6 +44,13 @@ class TestMemoryManager(unittest.TestCase):
         self.assertIn("schema_count", stats)
         self.assertIn("query_count", stats)
         self.assertIn("db_size_bytes", stats)
+        self.assertIn("db_path", stats)
+
+    def test_memory_path(self):
+        """Test memory_path returns a PostgreSQL connection string."""
+        path = self.memory_manager.memory_path
+        self.assertIsInstance(path, str)
+        self.assertTrue(path.startswith("postgresql://"))
 
     def assertHasAttr(self, obj, attr):
         """Helper method to check if object has attribute."""

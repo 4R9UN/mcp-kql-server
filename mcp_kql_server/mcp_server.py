@@ -115,7 +115,7 @@ async def execute_kql_query(
             if not generated_result["success"]:
                 return ErrorHandler.safe_json_dumps(generated_result, indent=2)
 
-            query = generated_result["query"]
+            query = generated_result.get("query_plain") or generated_result["query"]
             if output_format == "generation_only":
                 return ErrorHandler.safe_json_dumps(generated_result, indent=2)
 

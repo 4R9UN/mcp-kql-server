@@ -57,6 +57,9 @@ dependencies = [
     "pandas",
     "azure-cli",
     "pytest",
+    # PostgreSQL + pgvector (memory persistence)
+    "psycopg2-binary>=2.9.0,<3.0.0",
+    "pgvector>=0.3.0,<1.0.0",
 ]
 
 # No optional dependencies needed for production

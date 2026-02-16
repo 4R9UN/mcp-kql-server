@@ -1002,6 +1002,20 @@ QUERY_CHAINING_CONFIG = {
     "enable_adaptive_throttling": True,
 }
 
+# PostgreSQL Connection Configuration (for memory persistence)
+POSTGRES_CONFIG = {
+    "host": os.environ.get("DB_HOST", "localhost"),
+    "port": int(os.environ.get("DB_PORT", "5432")),
+    "user": os.environ.get("DB_USER", "postgres"),
+    "password": os.environ.get("DB_PASSWORD", ""),
+    "database": os.environ.get("DB_DATABASE", "postgres"),
+    "table_prefix": "kql_mcp_",
+    "min_connections": 2,
+    "max_connections": 10,
+    "connect_timeout": 10,
+    "sslmode": os.environ.get("DB_SSLMODE", "prefer"),
+}
+
 # Network Connection Configuration
 CONNECTION_CONFIG = {
     "max_retries": 5,
