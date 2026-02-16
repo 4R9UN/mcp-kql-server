@@ -14,6 +14,7 @@ Version: 2.2.0
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -179,9 +180,18 @@ class KustoConnectionPool:
         try:
             from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
             from .utils import normalize_cluster_uri
+            from .kql_auth import get_auth_mode
 
             normalized_url = normalize_cluster_uri(cluster_url)
-            kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(normalized_url)
+            if get_auth_mode() == "service_principal":
+                kcsb = KustoConnectionStringBuilder.with_aad_application_key_authentication(
+                    normalized_url,
+                    os.environ["KUSTO_CLIENT_ID"],
+                    os.environ["KUSTO_CLIENT_SECRET"],
+                    os.environ["KUSTO_TENANT_ID"],
+                )
+            else:
+                kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(normalized_url)
             client = KustoClient(kcsb)
 
             self._stats.connections_created += 1

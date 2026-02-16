@@ -1,9 +1,9 @@
 """
 KQL Authentication Module
 
-This module handles Azure CLI authentication for KQL cluster access.
-Provides cached authentication checking and device code flow authentication.
-Supports AzureCliCredential for async clients.
+This module handles Azure authentication for KQL cluster access.
+Supports both Azure CLI (local dev) and Service Principal (container/k8s) auth modes.
+The auth mode is auto-detected from environment variables.
 
 Author: Arjun Trivedi
 Email: arjuntrivedi42@yahoo.com
@@ -14,19 +14,58 @@ import platform
 import os
 import logging
 from functools import lru_cache
-from typing import Dict, Any
+from typing import Dict, Any, Union
 from tenacity import retry, stop_after_attempt, wait_exponential
-from azure.identity import AzureCliCredential
+from azure.identity import AzureCliCredential, ClientSecretCredential
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def get_auth_mode() -> str:
+    """
+    Detect auth mode from environment variables.
+
+    Returns 'service_principal' when KUSTO_CLIENT_ID, KUSTO_CLIENT_SECRET,
+    and KUSTO_TENANT_ID are all set. Otherwise returns 'az_cli'.
+    """
+    if all(os.environ.get(k) for k in ("KUSTO_CLIENT_ID", "KUSTO_CLIENT_SECRET", "KUSTO_TENANT_ID")):
+        return "service_principal"
+    return "az_cli"
+
+
 @lru_cache(maxsize=1)
-def get_azure_credential() -> AzureCliCredential:
+def get_azure_credential() -> Union[AzureCliCredential, ClientSecretCredential]:
     """
-    Get the Azure CLI credential for async clients.
+    Get the Azure credential based on auth mode.
+
+    In service_principal mode, returns ClientSecretCredential.
+    In az_cli mode, returns AzureCliCredential.
     """
+    if get_auth_mode() == "service_principal":
+        logger.info("Using Service Principal authentication")
+        return ClientSecretCredential(
+            tenant_id=os.environ["KUSTO_TENANT_ID"],
+            client_id=os.environ["KUSTO_CLIENT_ID"],
+            client_secret=os.environ["KUSTO_CLIENT_SECRET"],
+        )
     return AzureCliCredential()
+
+
+def _authenticate_service_principal() -> Dict[str, Any]:
+    """
+    Validate Service Principal credentials by requesting a token.
+    """
+    logger.info("Validating Service Principal credentials...")
+    try:
+        credential = get_azure_credential()
+        credential.get_token("https://kusto.kusto.windows.net/.default")
+        logger.info("Service Principal authentication successful.")
+        return {"authenticated": True, "message": "Service Principal authentication successful."}
+    except Exception as e:
+        logger.error("Service Principal authentication failed: %s", str(e))
+        return {"authenticated": False, "message": str(e)}
+
 
 @lru_cache(maxsize=1)
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -97,10 +136,16 @@ def authenticate():
     """
     Complete authentication flow with caching and retry logic.
 
+    In service_principal mode, validates credentials directly (no CLI needed).
+    In az_cli mode, checks CLI auth and falls back to device code login.
+
     Returns:
         dict: Final authentication status and message
     """
     logger.info("Starting authentication process...")
+
+    if get_auth_mode() == "service_principal":
+        return _authenticate_service_principal()
 
     auth_status = kql_auth()
     if auth_status["authenticated"]:

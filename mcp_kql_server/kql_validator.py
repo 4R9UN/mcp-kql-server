@@ -12,7 +12,7 @@ import re
 import logging
 from typing import Dict, List, Any
 
-from .constants import KQL_RESERVED_WORDS
+from .constants import KQL_RESERVED_WORDS, DYNAMIC_ACCESS_PATTERNS
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +173,56 @@ class KQLValidator:
             except Exception as e:
                 logger.warning("Schema discovery failed for %s: %s", table, e)
 
+    def _extract_dynamic_field_references(self, query: str) -> List[Dict[str, str]]:
+        """
+        Extract dynamic field access patterns from a query.
+
+        Returns list of dicts: {"base_col": str, "field_path": str, "full_ref": str}
+        Handles dot notation, bracket notation, and type-wrapped access.
+        """
+        refs = []
+        seen = set()
+
+        # Type-wrapped: tostring(Col.Field), toint(Col.Field.SubField)
+        for match in re.finditer(DYNAMIC_ACCESS_PATTERNS["type_wrapped"], query):
+            full_path = match.group(1)
+            parts = full_path.split(".")
+            if len(parts) >= 2:
+                ref = {"base_col": parts[0], "field_path": ".".join(parts[1:]), "full_ref": full_path}
+                key = ref["full_ref"]
+                if key not in seen:
+                    refs.append(ref)
+                    seen.add(key)
+
+        # Dot notation: Col.Field or Col.Field.SubField (but not KQL keywords like kind.inner)
+        for match in re.finditer(DYNAMIC_ACCESS_PATTERNS["dot_notation"], query):
+            full_path = match.group(1)
+            parts = full_path.split(".")
+            base = parts[0]
+            # Skip if base is a KQL keyword or known non-column pattern
+            if base.lower() in {w.lower() for w in KQL_RESERVED_WORDS}:
+                continue
+            if base.startswith("$"):  # $left.col, $right.col
+                continue
+            ref = {"base_col": base, "field_path": ".".join(parts[1:]), "full_ref": full_path}
+            key = ref["full_ref"]
+            if key not in seen:
+                refs.append(ref)
+                seen.add(key)
+
+        # Bracket notation: Col["Field"]
+        for match in re.finditer(DYNAMIC_ACCESS_PATTERNS["bracket_notation"], query):
+            base_col = match.group(1)
+            field_name = match.group(3)
+            if base_col.lower() not in {w.lower() for w in KQL_RESERVED_WORDS}:
+                ref = {"base_col": base_col, "field_path": field_name, "full_ref": f'{base_col}["{field_name}"]'}
+                key = ref["full_ref"]
+                if key not in seen:
+                    refs.append(ref)
+                    seen.add(key)
+
+        return refs
+
     async def _validate_table_usage(
         self,
         query: str,
@@ -182,6 +232,7 @@ class KQLValidator:
     ) -> tuple[List[str], List[str], int]:
         """
         Validate column usage for a specific table.
+        Handles both regular columns and dynamic field access patterns.
 
         Returns:
             (errors, warnings, validated_count)
@@ -204,11 +255,49 @@ class KQLValidator:
                 errors.append(f"No columns found in schema for '{table}'. Cannot validate query.")
                 return errors, warnings, 0
 
-            # Extract column references for this table
+            # Extract dynamic field references first
+            dynamic_refs = self._extract_dynamic_field_references(query)
+            dynamic_base_cols = {ref["base_col"] for ref in dynamic_refs}
+
+            # Validate dynamic field references
+            for ref in dynamic_refs:
+                base_col = ref["base_col"]
+                if base_col in columns:
+                    col_type = columns[base_col].get("data_type", "").lower() if isinstance(columns[base_col], dict) else ""
+                    if "dynamic" in col_type:
+                        validated_count += 1
+                        # Optionally validate sub-field if we have metadata
+                        col_info = columns[base_col]
+                        known_fields = col_info.get("dynamic_fields", {}) if isinstance(col_info, dict) else {}
+                        top_field = ref["field_path"].split(".")[0].split("[")[0]
+                        if known_fields and top_field not in known_fields:
+                            warnings.append(
+                                f"Dynamic sub-field '{top_field}' not found in known fields of '{base_col}'. "
+                                f"Known fields: {', '.join(sorted(known_fields.keys()))}. "
+                                f"This may still be valid if the field exists in the data."
+                            )
+                    else:
+                        warnings.append(
+                            f"Column '{base_col}' is accessed with dot notation but is type '{col_type}', not dynamic."
+                        )
+                # If base_col not in columns, the regular column validation will catch it
+
+            # Extract regular column references, excluding dynamic access base columns
+            # that are already validated above
             column_refs = self._extract_column_references(query, table)
 
-            # Validate each column reference
+            # Validate each regular column reference
             for col_ref in column_refs:
+                # Skip if this column is part of a dynamic field access
+                if col_ref in dynamic_base_cols:
+                    continue
+                # Skip if this looks like a sub-field fragment (e.g., "displayName" from "Col.displayName")
+                is_subfield_fragment = any(
+                    col_ref == ref["field_path"].split(".")[0] for ref in dynamic_refs
+                )
+                if is_subfield_fragment:
+                    continue
+
                 if col_ref not in columns:
                     errors.append(
                         f"Column '{col_ref}' not found in table '{table}'. "
