@@ -1003,9 +1003,16 @@ QUERY_CHAINING_CONFIG = {
 }
 
 # PostgreSQL Connection Configuration (for memory persistence)
+_raw_db_host = os.environ.get("DB_HOST", "localhost")
+if ":" in _raw_db_host:
+    _db_host, _db_port = _raw_db_host.rsplit(":", 1)
+else:
+    _db_host = _raw_db_host
+    _db_port = os.environ.get("DB_PORT", "5432")
+
 POSTGRES_CONFIG = {
-    "host": os.environ.get("DB_HOST", "localhost"),
-    "port": int(os.environ.get("DB_PORT", "5432")),
+    "host": _db_host,
+    "port": int(_db_port),
     "user": os.environ.get("DB_USER", "postgres"),
     "password": os.environ.get("DB_PASSWORD", ""),
     "database": os.environ.get("DB_DATABASE", "postgres"),
