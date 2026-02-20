@@ -1,5 +1,5 @@
 # Build Stage
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 # Prevent Python from writing pyc files and buffering stdout
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -12,11 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first to leverage Docker cache
-COPY requirements.txt .
+# Copy production requirements
+COPY deployment/requirements-prod.txt .
 
 # Create wheels for dependencies
-RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements-prod.txt
 
 # Runtime Stage
 FROM python:3.11-slim
@@ -41,7 +41,8 @@ RUN pip install --no-cache /wheels/*
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 # Copy application code
-COPY . .
+COPY mcp_kql_server/ ./mcp_kql_server/
+COPY pyproject.toml .
 
 # Change ownership to non-root user
 RUN chown -R mcpuser:mcpuser /app
