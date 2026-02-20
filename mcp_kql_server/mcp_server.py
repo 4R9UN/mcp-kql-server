@@ -1157,6 +1157,12 @@ def main():
             host = os.environ.get("MCP_HOST", "0.0.0.0")
             port = int(os.environ.get("MCP_PORT", "8000"))
             logger.info("Starting MCP server with %s transport on %s:%d", transport, host, port)
+            logger.info("REST API available at http://%s:%d/query and /health", host, port)
+
+            # Inject REST routes into FastMCP's Starlette app
+            from .rest_api import rest_routes
+            mcp._additional_http_routes.extend(rest_routes)
+
             mcp.run(transport=transport, host=host, port=port)
         else:
             mcp.run()
