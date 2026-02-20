@@ -52,11 +52,12 @@ async def query(request: Request) -> JSONResponse:
     if not database:
         return JSONResponse({"error": "No database provided and KUSTO_DEFAULT_DATABASE env not set"}, status_code=400)
 
-    # Import here to avoid circular imports
+    # Import the MCP tool and call its underlying function (.fn)
+    # since @mcp.tool() wraps it in a FunctionTool object
     from .mcp_server import execute_kql_query
 
     try:
-        result = await execute_kql_query(
+        result = await execute_kql_query.fn(
             query=query_text,
             cluster_url=cluster_url,
             database=database,
