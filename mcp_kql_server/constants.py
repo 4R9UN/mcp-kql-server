@@ -1023,6 +1023,10 @@ POSTGRES_CONFIG = {
     "sslmode": os.environ.get("DB_SSLMODE", "prefer"),
 }
 
+# Kusto defaults for REST API (MCP tools require these per-request, REST API can default)
+KUSTO_CLUSTER_URL = os.environ.get("KUSTO_CLUSTER_URL", "")
+KUSTO_DEFAULT_DATABASE = os.environ.get("KUSTO_DEFAULT_DATABASE", "")
+
 # Network Connection Configuration
 CONNECTION_CONFIG = {
     "max_retries": 5,
