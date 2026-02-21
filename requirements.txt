@@ -10,10 +10,8 @@ azure-cli
 azure-kusto-data>=4.0.0,<6.0.0
 azure-identity>=1.15.0,<2.0.0
 
-# Data Handling and AI/ML
+# Data Handling
 pandas
-sentence-transformers>=2.0.0,<6.0.0
-scikit-learn>=1.0.0,<2.0.0
 numpy>=1.21.0,<3.0.0
 
 # PostgreSQL + pgvector (memory persistence)
