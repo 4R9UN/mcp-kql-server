@@ -37,9 +37,6 @@ COPY --from=builder /app/wheels /wheels
 # Install dependencies
 RUN pip install --no-cache /wheels/*
 
-# Pre-download the sentence-transformers model to avoid cold-start delay
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
-
 # Copy application code
 COPY mcp_kql_server/ ./mcp_kql_server/
 COPY pyproject.toml .

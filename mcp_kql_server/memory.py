@@ -5,7 +5,7 @@ This module provides a high-performance memory system that:
 - Uses PostgreSQL with pgvector for persistent, shared storage of schemas and queries.
 - Implements Context Augmented Generation (CAG) to load full schemas into LLM context.
 - Uses TOON (Token-Oriented Object Notation) for compact schema representation.
-- Supports Semantic Search (using sentence-transformers) for Few-Shot prompting.
+- Supports Semantic Search (using Azure OpenAI embeddings) for Few-Shot prompting.
 - Uses pgvector for native cosine similarity search in PostgreSQL.
 
 Author: Arjun Trivedi
@@ -19,7 +19,6 @@ from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
-import numpy as np
 
 try:
     import psycopg2
@@ -30,12 +29,7 @@ try:
 except ImportError:
     HAS_PSYCOPG2 = False
 
-try:
-    from sentence_transformers import SentenceTransformer
-    HAS_SENTENCE_TRANSFORMERS = True
-except ImportError:
-    SentenceTransformer = None
-    HAS_SENTENCE_TRANSFORMERS = False
+from .llm_client import generate_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -57,63 +51,6 @@ TOON_TYPE_MAP = {
     'object': 'obj'
 }
 
-class SemanticSearch:
-    """Handles embedding generation and similarity search with optimized loading."""
-    _instance = None
-    _instance_lock = threading.Lock()
-
-    def __new__(cls, model_name='all-MiniLM-L6-v2'):
-        """Singleton pattern to share model across instances."""
-        with cls._instance_lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False  # pylint: disable=protected-access
-            return cls._instance
-
-    def __init__(self, model_name='all-MiniLM-L6-v2'):
-        if getattr(self, '_initialized', False):
-            return
-        self.model_name = model_name
-        self.model = None
-        self._loading = False
-        self._load_lock = threading.Lock()
-        self._initialized = True
-
-    def preload(self):
-        """Preload model in background thread for faster first query."""
-        if self.model is None and not self._loading and HAS_SENTENCE_TRANSFORMERS:
-            threading.Thread(target=self._load_model, daemon=True).start()
-
-    def _load_model(self):
-        """Thread-safe lazy load of the model."""
-        with self._load_lock:
-            if self.model is None and HAS_SENTENCE_TRANSFORMERS:
-                self._loading = True
-                try:
-                    logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
-                    if SentenceTransformer:
-                        self.model = SentenceTransformer(self.model_name)
-                    logger.info("Loaded Semantic Search model: %s", self.model_name)
-                except Exception as e:
-                    logger.warning("Failed to load SentenceTransformer: %s", e)
-                finally:
-                    self._loading = False
-
-    def encode(self, text: str) -> Optional[list]:
-        """Generate embedding for text and return as list of floats for pgvector."""
-        self._load_model()
-
-        if self.model is None:
-            return None
-        try:
-            embedding = self.model.encode(text)
-            if not isinstance(embedding, np.ndarray):
-                embedding = np.array(embedding)
-            return embedding.astype(np.float32).tolist()
-        except Exception as e:
-            logger.error("Encoding failed: %s", e)
-            return None
-
 @dataclass
 class ValidationResult:
     """Result of query validation against schema."""
@@ -130,7 +67,6 @@ class MemoryManager:
     def __init__(self):
         from .constants import POSTGRES_CONFIG
         self._pg_config = POSTGRES_CONFIG
-        self.semantic_search = SemanticSearch()
         self._schema_cache: Dict[str, Any] = {}
         self._pool = None
         self._pool_lock = threading.Lock()
@@ -212,7 +148,7 @@ class MemoryManager:
                         database TEXT NOT NULL,
                         table_name TEXT NOT NULL,
                         columns_json TEXT,
-                        embedding vector(384),
+                        embedding vector(1536),
                         description TEXT,
                         last_updated TIMESTAMP DEFAULT NOW(),
                         PRIMARY KEY (cluster, database, table_name)
@@ -227,7 +163,7 @@ class MemoryManager:
                         database TEXT,
                         query TEXT,
                         description TEXT,
-                        embedding vector(384),
+                        embedding vector(1536),
                         timestamp TIMESTAMP DEFAULT NOW(),
                         execution_time_ms REAL
                     )
@@ -322,7 +258,7 @@ class MemoryManager:
         if dynamic_paths:
             embedding_text += f". Dynamic fields: {' '.join(dynamic_paths)}"
 
-        embedding = self.semantic_search.encode(embedding_text)
+        embedding = generate_embedding(embedding_text)
 
         try:
             # If description is not provided, try to preserve existing one
@@ -359,7 +295,7 @@ class MemoryManager:
         if not self._db_available:
             return
 
-        embedding = self.semantic_search.encode(f"{description} {query}")
+        embedding = generate_embedding(f"{description} {query}")
 
         try:
             with self._get_conn() as cur:
@@ -398,7 +334,7 @@ class MemoryManager:
         if not self._db_available:
             return []
 
-        query_embedding = self.semantic_search.encode(query)
+        query_embedding = generate_embedding(query)
         if query_embedding is None:
             return []
 
@@ -433,7 +369,7 @@ class MemoryManager:
         if not self._db_available:
             return []
 
-        query_embedding = self.semantic_search.encode(query)
+        query_embedding = generate_embedding(query)
         if query_embedding is None:
             return []
 
