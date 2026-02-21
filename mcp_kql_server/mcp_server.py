@@ -1040,10 +1040,11 @@ async def _schema_refresh_operation(cluster_url: str, database: str) -> str:
                 "error": "cluster_url and database are required for refresh_schema operation"
             })
 
-        # Step 1: List all tables using SchemaDiscovery
-        from .utils import SchemaDiscovery
-        discovery = SchemaDiscovery(memory_manager)
-        tables = await discovery.list_tables_in_db(cluster_url, database)
+        # Step 1: Always query Kusto live for the full table list
+        tables_data = await schema_manager._execute_kusto_async(
+            ".show tables", cluster_url, database, is_mgmt=True
+        )
+        tables = [row["TableName"] for row in tables_data]
 
         if not tables:
             return json.dumps({
