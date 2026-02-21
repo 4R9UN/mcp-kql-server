@@ -1027,6 +1027,12 @@ POSTGRES_CONFIG = {
 KUSTO_CLUSTER_URL = os.environ.get("KUSTO_CLUSTER_URL", "")
 KUSTO_DEFAULT_DATABASE = os.environ.get("KUSTO_DEFAULT_DATABASE", "")
 
+# Azure OpenAI Configuration (for LLM-based NL2KQL generation)
+AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "")
+
 # Network Connection Configuration
 CONNECTION_CONFIG = {
     "max_retries": 5,
