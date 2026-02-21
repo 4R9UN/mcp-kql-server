@@ -376,73 +376,79 @@ async def _generate_kql_from_natural_language(
         # 6. Find similar successful queries from memory for pattern matching
         similar_queries = memory_manager.find_similar_queries(cluster_url, database, natural_language_query, limit=3)
 
-        # 7. Extract ONLY columns that exist in schema memory
-        # First, extract all words from NL query that might be columns
-        nl_words = set(re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', natural_language_query.lower()))
-        
-        # Filter out KQL reserved words before matching
-        nl_words = {w for w in nl_words if w not in reserved_words_lower}
+        # 7. Try LLM-based query generation (falls back to schema-only if unavailable)
+        from .ai_prompts import build_generation_prompt, KQL_SYSTEM_PROMPT, extract_kql_from_response
+        from .llm_client import generate_kql
 
-        # Also extract from similar queries (these are validated queries from memory)
-        for sq in similar_queries:
-            if sq.get('score', 0) > 0.5:  # Only use high-confidence matches
-                sq_words = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', sq.get('query', '').lower())
-                # Filter reserved words from similar queries too
-                sq_words = [w for w in sq_words if w not in reserved_words_lower]
-                nl_words.update(sq_words)
+        prompt = build_generation_prompt(
+            nl_query=natural_language_query,
+            schema=schema_info,
+            table_name=target_table,
+            similar_queries=similar_queries,
+        )
 
-        # 8. Match against schema columns AND dynamic sub-fields (strict validation)
-        valid_columns = []
-        dynamic_projections = []  # For dynamic sub-field access expressions
-
-        # Build a map of dynamic sub-field names -> (parent_col, field_info)
-        from .constants import DYNAMIC_TYPE_ACCESSORS
-        dynamic_field_map = {}  # field_name_lower -> (parent_col, field_name, field_type)
-        for col_name, col_info in schema_columns.items():
-            if isinstance(col_info, dict) and col_info.get("dynamic_fields"):
-                for sf_name, sf_info in col_info["dynamic_fields"].items():
-                    sf_type = sf_info.get("type", "string") if isinstance(sf_info, dict) else "string"
-                    dynamic_field_map[sf_name.lower()] = (col_name, sf_name, sf_type)
-
-        for word in nl_words:
-            if word in col_map:
-                actual_col = col_map[word]
-                # Double-check the column exists in schema (defensive)
-                if actual_col in schema_columns:
-                    valid_columns.append(actual_col)
-            elif word in dynamic_field_map:
-                # Match against dynamic sub-fields
-                parent_col, sf_name, sf_type = dynamic_field_map[word]
-                accessor = DYNAMIC_TYPE_ACCESSORS.get(sf_type, "tostring")
-                if accessor:
-                    expr = f"{accessor}({parent_col}.{sf_name})"
-                else:
-                    expr = f"{parent_col}.{sf_name}"
-                dynamic_projections.append(expr)
-
-        # Remove duplicates while preserving order
-        valid_columns = list(dict.fromkeys(valid_columns))
-        dynamic_projections = list(dict.fromkeys(dynamic_projections))
-
-        # 9. Build query using ONLY validated schema data
-        if valid_columns or dynamic_projections:
-            # Limit to reasonable number of columns
-            project_cols = valid_columns[:12]
-            all_projections = [bracket_if_needed(c) for c in project_cols] + dynamic_projections[:4]
-            project_clause = ", ".join(all_projections)
-            final_query = f"{bracket_if_needed(target_table)} | project {project_clause} | take 10"
-            method = "schema_memory_validated"
-            columns_used = project_cols + [p for p in dynamic_projections[:4]]
+        llm_response = await generate_kql(KQL_SYSTEM_PROMPT, prompt)
+        if llm_response:
+            final_query = extract_kql_from_response(llm_response)
+            method = "llm_generated"
+            columns_used = [c for c in all_schema_columns if c.lower() in final_query.lower()]
+            logger.info("LLM-generated KQL: %s", final_query)
         else:
-            # Safe fallback: project first N columns from schema (NOT all columns)
-            # This ensures we always use schema-validated columns
-            default_cols = all_schema_columns[:10]  # First 10 schema columns
-            project_clause = ", ".join(bracket_if_needed(c) for c in default_cols)
-            final_query = f"{bracket_if_needed(target_table)} | project {project_clause} | take 10"
-            method = "schema_memory_fallback"
-            columns_used = default_cols
-            logger.info("No specific columns matched from NL query for '%s', using schema columns: %s", 
-                       target_table, default_cols)
+            # 8. Fallback: schema-only column matching (when LLM is unavailable)
+            logger.info("LLM unavailable, falling back to schema-only query generation")
+
+            nl_words = set(re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', natural_language_query.lower()))
+            nl_words = {w for w in nl_words if w not in reserved_words_lower}
+
+            for sq in similar_queries:
+                if sq.get('score', 0) > 0.5:
+                    sq_words = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', sq.get('query', '').lower())
+                    sq_words = [w for w in sq_words if w not in reserved_words_lower]
+                    nl_words.update(sq_words)
+
+            valid_columns = []
+            dynamic_projections = []
+
+            from .constants import DYNAMIC_TYPE_ACCESSORS
+            dynamic_field_map = {}
+            for col_name, col_info in schema_columns.items():
+                if isinstance(col_info, dict) and col_info.get("dynamic_fields"):
+                    for sf_name, sf_info in col_info["dynamic_fields"].items():
+                        sf_type = sf_info.get("type", "string") if isinstance(sf_info, dict) else "string"
+                        dynamic_field_map[sf_name.lower()] = (col_name, sf_name, sf_type)
+
+            for word in nl_words:
+                if word in col_map:
+                    actual_col = col_map[word]
+                    if actual_col in schema_columns:
+                        valid_columns.append(actual_col)
+                elif word in dynamic_field_map:
+                    parent_col, sf_name, sf_type = dynamic_field_map[word]
+                    accessor = DYNAMIC_TYPE_ACCESSORS.get(sf_type, "tostring")
+                    if accessor:
+                        expr = f"{accessor}({parent_col}.{sf_name})"
+                    else:
+                        expr = f"{parent_col}.{sf_name}"
+                    dynamic_projections.append(expr)
+
+            valid_columns = list(dict.fromkeys(valid_columns))
+            dynamic_projections = list(dict.fromkeys(dynamic_projections))
+
+            if valid_columns or dynamic_projections:
+                project_cols = valid_columns[:12]
+                all_projections = [bracket_if_needed(c) for c in project_cols] + dynamic_projections[:4]
+                project_clause = ", ".join(all_projections)
+                final_query = f"{bracket_if_needed(target_table)} | project {project_clause} | take 10"
+                method = "schema_memory_validated"
+                columns_used = project_cols + [p for p in dynamic_projections[:4]]
+            else:
+                default_cols = all_schema_columns[:10]
+                project_clause = ", ".join(bracket_if_needed(c) for c in default_cols)
+                final_query = f"{bracket_if_needed(target_table)} | project {project_clause} | take 10"
+                method = "schema_memory_fallback"
+                columns_used = default_cols
+                logger.info("No specific columns matched from NL query for '%s', using schema columns: %s",
+                           target_table, default_cols)
 
         # 10. Build structured response with special tokens for LLM parsing
         # Format columns with special tokens for better semantic understanding
