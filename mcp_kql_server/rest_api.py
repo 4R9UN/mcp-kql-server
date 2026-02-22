@@ -5,11 +5,10 @@ Provides simple HTTP endpoints alongside the MCP protocol so users can
 query via curl or any HTTP client without needing the MCP SDK.
 """
 
-import json
 import logging
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 logger = logging.getLogger(__name__)
@@ -63,7 +62,7 @@ async def query(request: Request) -> JSONResponse:
             database=database,
             generate_query=generate_query,
         )
-        return JSONResponse(json.loads(result))
+        return Response(content=result, media_type="application/json")
     except Exception as e:
         logger.error("REST API query error: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -102,7 +101,7 @@ async def discover(request: Request) -> JSONResponse:
             cluster_url=cluster_url,
             database=database,
         )
-        return JSONResponse(json.loads(result))
+        return Response(content=result, media_type="application/json")
     except Exception as e:
         logger.error("REST API discover error: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)

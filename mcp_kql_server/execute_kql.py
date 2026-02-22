@@ -367,6 +367,20 @@ async def _post_execution_learning_bg(query: str, cluster: str, database: str, _
                         logger.debug("Stored global successful query: %s", description)
                     except (ValueError, TypeError, AttributeError) as e:
                         logger.debug("Failed to store global successful query: %s", e)
+
+                    # Store learning event for analytics (global path)
+                    try:
+                        row_count = len(_df) if hasattr(_df, '__len__') else 0
+                        col_count = len(_df.columns) if hasattr(_df, 'columns') else 0
+                        memory_manager.store_learning_result(
+                            query=query,
+                            result_data={"tables": [], "row_count": row_count, "column_count": col_count},
+                            execution_type="query_execution",
+                            execution_time_ms=execution_time_ms,
+                        )
+                    except (ValueError, TypeError, AttributeError) as e:
+                        logger.debug("Failed to store learning event (global): %s", e)
+
                     return
             except (ValueError, TypeError, AttributeError) as fallback_error:
                 logger.debug("Fallback table extraction failed: %s", fallback_error)
@@ -384,6 +398,19 @@ async def _post_execution_learning_bg(query: str, cluster: str, database: str, _
                 logger.debug("Stored successful query for %s: %s", table, description)
             except (ValueError, TypeError, AttributeError) as e:
                 logger.debug("Failed to store successful query for %s: %s", table, e)
+
+        # Store learning event for analytics
+        try:
+            row_count = len(_df) if hasattr(_df, '__len__') else 0
+            col_count = len(_df.columns) if hasattr(_df, 'columns') else 0
+            memory_manager.store_learning_result(
+                query=query,
+                result_data={"tables": tables, "row_count": row_count, "column_count": col_count},
+                execution_type="query_execution",
+                execution_time_ms=execution_time_ms,
+            )
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.debug("Failed to store learning event: %s", e)
 
         # ENHANCED: Force schema discovery for all tables involved in the query
         await _ensure_schema_discovered(cluster, database, tables)
@@ -423,12 +450,18 @@ async def _ensure_schema_discovered(cluster_uri: str, database: str, tables: Lis
 
                 if discovered_schema and discovered_schema.get("columns"):
                     logger.info("Successfully auto-discovered schema for %s with %d columns", table, len(discovered_schema['columns']))
+                    # Discover column-name join hints for newly discovered table
+                    _discover_column_name_joins(cluster_uri, database, table, discovered_schema['columns'], memory)
                 elif discovered_schema and discovered_schema.get("is_not_found"):
                     logger.info("Schema discovery skipped for '%s' (likely a local variable or function)", table)
                 else:
                     logger.warning("Auto-discovery failed for %s - no columns found", table)
             else:
-                logger.debug("Schema already exists for %s, skipping auto-discovery", table)
+                logger.debug("Schema already exists for %s, checking column-name joins", table)
+                # Schema exists — still run column-name join discovery (cheap, uses cached schemas)
+                columns = schema.get("columns", {})
+                if columns:
+                    _discover_column_name_joins(cluster_uri, database, table, columns, memory)
 
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             logger.warning("Auto schema discovery failed for %s: %s", table, e)
@@ -507,6 +540,106 @@ def _learn_dynamic_field_patterns(query: str, cluster: str, database: str, table
 
     except Exception as e:
         logger.debug("Dynamic field pattern learning failed: %s", e)
+
+
+# Generic columns that appear in most tables and make poor join keys
+_GENERIC_COLUMNS = frozenset({
+    'timegenerated', 'timestamp', 'time', 'type', 'tenantid',
+    'sourcesystem', '_resourceid', 'managementgroupname',
+    'computer', 'rawdata', '_isbillable', 'ingestiontime',
+    'id', '_billedsize',
+})
+
+
+def _compute_column_join_confidence(
+    col_name: str, col_info_a: Dict[str, Any], col_info_b: Dict[str, Any]
+) -> float:
+    """Compute confidence that two columns with the same name are a valid join key."""
+    confidence = 0.70  # Base confidence for any shared name
+
+    name_lower = col_name.lower()
+
+    # Strong foreign-key signal from naming conventions
+    if (name_lower.endswith('id') or name_lower.endswith('_id') or
+        name_lower.endswith('key') or name_lower.endswith('_key')):
+        confidence = 0.90
+
+    # Get data types
+    type_a = (col_info_a.get("data_type") or col_info_a.get("column_type") or "").lower()
+    type_b = (col_info_b.get("data_type") or col_info_b.get("column_type") or "").lower()
+
+    # GUID columns are almost always join keys
+    if "guid" in type_a or "guid" in type_b:
+        confidence = max(confidence, 0.95)
+
+    # Type match boost/penalty
+    if type_a and type_b:
+        if type_a == type_b:
+            confidence = min(confidence + 0.05, 1.0)
+        else:
+            confidence = max(confidence - 0.15, 0.3)
+
+    return round(confidence, 2)
+
+
+def _discover_column_name_joins(
+    cluster: str, database: str, table: str,
+    columns: Dict[str, Any], memory_manager
+) -> None:
+    """
+    Discover join hints by comparing column names across tables.
+    When two tables share a column name, store a join hint with confidence scoring.
+    """
+    try:
+        if not columns or not isinstance(columns, dict):
+            return
+
+        # Build set of this table's non-generic column names (lowered -> original name, info)
+        our_columns: Dict[str, tuple] = {}
+        for col_name, col_info in columns.items():
+            col_lower = col_name.lower()
+            if col_lower not in _GENERIC_COLUMNS:
+                our_columns[col_lower] = (col_name, col_info if isinstance(col_info, dict) else {})
+
+        if not our_columns:
+            return
+
+        # Get all table schemas from memory (uses 5-min in-memory cache)
+        schemas = memory_manager._get_database_schema(cluster, database)
+
+        for schema in schemas:
+            other_table = schema.get("table", "")
+            if not other_table or other_table == table:
+                continue  # Skip self-joins
+
+            other_columns = schema.get("columns", {})
+            if not isinstance(other_columns, dict):
+                continue
+
+            for other_col_name, other_col_info in other_columns.items():
+                other_lower = other_col_name.lower()
+                if other_lower not in our_columns or other_lower in _GENERIC_COLUMNS:
+                    continue
+
+                our_col_name, our_col_info = our_columns[other_lower]
+                other_info = other_col_info if isinstance(other_col_info, dict) else {}
+
+                confidence = _compute_column_join_confidence(our_col_name, our_col_info, other_info)
+                if confidence < 0.5:
+                    continue
+
+                # Alphabetically order table names to prevent directional duplicates
+                if table < other_table:
+                    t1, t2, c1, c2 = table, other_table, our_col_name, other_col_name
+                else:
+                    t1, t2, c1, c2 = other_table, table, other_col_name, our_col_name
+
+                join_condition = f"{t1}.{c1} == {t2}.{c2}"
+                memory_manager.store_join_hint(t1, t2, join_condition, confidence)
+                logger.debug("Discovered column-name join hint: %s (confidence=%.2f)", join_condition, confidence)
+
+    except Exception as e:
+        logger.debug("Column-name join discovery failed for %s: %s", table, e)
 
 
 def get_knowledge_corpus():

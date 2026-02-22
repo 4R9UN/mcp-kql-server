@@ -787,6 +787,13 @@ class SchemaManager:
         # Enrich dynamic columns with sub-field introspection
         self._enrich_dynamic_columns(table, columns, cluster, database)
 
+        # Discover column-name based join hints
+        try:
+            from .execute_kql import _discover_column_name_joins
+            _discover_column_name_joins(cluster, database, table, columns, self.memory_manager)
+        except Exception as e:
+            logger.debug("Column-name join discovery failed during schema creation for %s: %s", table, e)
+
         schema_obj = {
             "table_name": table,
             "columns": columns,
@@ -1820,7 +1827,14 @@ class ErrorHandler:
             # Set default serializer if not provided
             if 'default' not in kwargs:
                 kwargs['default'] = json_serializer
-            return json.dumps(data, **kwargs)
+            result = json.dumps(data, **kwargs)
+            # Replace non-JSON-compliant float tokens that json.dumps emits
+            # (NaN, Infinity, -Infinity are valid JS but not valid JSON)
+            result = result.replace(': NaN', ': null').replace(': Infinity', ': null').replace(': -Infinity', ': null')
+            result = result.replace('[NaN', '[null').replace(', NaN', ', null')
+            result = result.replace('[Infinity', '[null').replace(', Infinity', ', null')
+            result = result.replace('[-Infinity', '[null').replace(', -Infinity', ', null')
+            return result
         except (ValueError, TypeError, AttributeError) as e:
             logger.warning("JSON serialization failed: %s", e)
             return default
