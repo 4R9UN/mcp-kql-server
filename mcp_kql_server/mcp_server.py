@@ -226,32 +226,50 @@ async def execute_kql_query(
             return df.to_string(index=False)
         else:
             # Convert DataFrame to serializable format with proper type handling
+            def _is_nan_or_inf(value) -> bool:
+                """Check if a scalar value is NaN or Infinity."""
+                import math
+                try:
+                    if isinstance(value, float):
+                        return math.isnan(value) or math.isinf(value)
+                    if hasattr(value, 'item'):  # numpy scalar
+                        v = value.item()
+                        return isinstance(v, float) and (math.isnan(v) or math.isinf(v))
+                except (TypeError, ValueError):
+                    pass
+                return False
+
+            def _is_na(value) -> bool:
+                """Check if a value is NA/NaN, safe for arrays and containers."""
+                try:
+                    result = pd.isna(value)
+                    # pd.isna returns array for array input; treat as not-NA
+                    if isinstance(result, bool):
+                        return result
+                    return False
+                except (ValueError, TypeError):
+                    return False
+
             def convert_dataframe_to_serializable(df):
                 """Convert DataFrame to JSON-serializable format."""
-                try:
-                    # Convert to records and handle timestamps/types properly
-                    records = []
-                    for _, row in df.iterrows():
-                        record = {}
-                        for col, value in row.items():
-                            if pd.isna(value):
-                                record[col] = None
-                            elif hasattr(value, 'isoformat'):  # Timestamp objects
-                                record[col] = value.isoformat()
-                            elif hasattr(value, 'strftime'):  # datetime objects
-                                record[col] = value.strftime('%Y-%m-%d %H:%M:%S')
-                            elif isinstance(value, type):  # type objects
-                                record[col] = value.__name__
-                            elif hasattr(value, 'item'):  # numpy types
-                                record[col] = value.item()
-                            else:
-                                record[col] = value
-                        records.append(record)
-                    return records
-                except (ValueError, TypeError, AttributeError) as e:
-                    logger.warning("DataFrame conversion failed: %s", e)
-                    # Fallback: convert to string representation
-                    return df.astype(str).to_dict("records")
+                records = []
+                for _, row in df.iterrows():
+                    record = {}
+                    for col, value in row.items():
+                        if _is_nan_or_inf(value) or _is_na(value):
+                            record[col] = None
+                        elif hasattr(value, 'isoformat'):  # Timestamp objects
+                            record[col] = value.isoformat()
+                        elif hasattr(value, 'strftime'):  # datetime objects
+                            record[col] = value.strftime('%Y-%m-%d %H:%M:%S')
+                        elif isinstance(value, type):  # type objects
+                            record[col] = value.__name__
+                        elif hasattr(value, 'item'):  # numpy types
+                            record[col] = value.item()
+                        else:
+                            record[col] = value
+                    records.append(record)
+                return records
 
             # Import special tokens for structured output
             from .constants import SPECIAL_TOKENS
