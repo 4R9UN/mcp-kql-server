@@ -326,25 +326,40 @@ async def _generate_kql_from_natural_language(
     from .constants import KQL_RESERVED_WORDS, SPECIAL_TOKENS
     
     try:
-        # 1. First, try to find relevant tables from schema memory using semantic search
+        # 1. Find relevant tables from schema memory using semantic search
         relevant_tables = memory_manager.find_relevant_tables(cluster_url, database, natural_language_query, limit=5)
 
-        # 2. Determine target table from: explicit param > semantic search > NL extraction
+        # 2. Build candidate tables list
+        # Priority: explicit table_name > multi-table LLM selection > regex fallback
+        candidate_tables: list = []
         target_table = None
+
         if table_name:
-            target_table = table_name
+            # Explicit table provided — use single-table path
+            schema_info = await schema_manager.get_table_schema(cluster_url, database, table_name)
+            if schema_info and schema_info.get("columns"):
+                candidate_tables = [{"table": table_name, "columns": schema_info["columns"], "score": 1.0}]
+                target_table = table_name
+            else:
+                return {
+                    "success": False,
+                    "error": f"No schema found for {SPECIAL_TOKENS['TABLE_START']}{table_name}{SPECIAL_TOKENS['TABLE_END']} in memory.",
+                    "query": "",
+                    "suggestion": f"Run: schema_memory(operation='discover', cluster_url='{cluster_url}', database='{database}', table_name='{table_name}')"
+                }
         elif relevant_tables:
-            # Use the most relevant table from schema memory
-            target_table = relevant_tables[0]["table"]
-            logger.info("Selected table '%s' from schema memory (score: %.2f)",
-                       target_table, relevant_tables[0].get("score", 0))
+            candidate_tables = relevant_tables
         else:
             # Fallback: extract potential table name from NL query
             potential_tables = re.findall(r'\b([A-Z][A-Za-z0-9_]*)\b', natural_language_query)
             if potential_tables:
-                target_table = potential_tables[0]
+                fallback = potential_tables[0]
+                schema_info = await schema_manager.get_table_schema(cluster_url, database, fallback)
+                if schema_info and schema_info.get("columns"):
+                    candidate_tables = [{"table": fallback, "columns": schema_info["columns"], "score": 0.0}]
+                    target_table = fallback
 
-        if not target_table:
+        if not candidate_tables:
             return {
                 "success": False,
                 "error": f"{SPECIAL_TOKENS['CLUSTER_START']}ERROR{SPECIAL_TOKENS['CLUSTER_END']} Could not determine target table.",
@@ -352,49 +367,94 @@ async def _generate_kql_from_natural_language(
                 "suggestion": "Use schema_memory tool to discover available tables before generating queries."
             }
 
-        # 3. Get schema for the target table from schema memory (NOT hardcoded)
-        schema_info = await schema_manager.get_table_schema(cluster_url, database, target_table)
-        if not schema_info or not schema_info.get("columns"):
-            return {
-                "success": False,
-                "error": f"No schema found for {SPECIAL_TOKENS['TABLE_START']}{target_table}{SPECIAL_TOKENS['TABLE_END']} in memory.",
-                "query": "",
-                "suggestion": f"Run: schema_memory(operation='discover', cluster_url='{cluster_url}', database='{database}', table_name='{target_table}')"
-            }
-
-        # 4. Build column mapping ONLY from schema memory (case-insensitive)
-        schema_columns = schema_info["columns"]
-        col_map = {c.lower(): c for c in schema_columns.keys()}
-        all_schema_columns = list(schema_columns.keys())  # Preserve order
-        
-        # Build set of reserved words for filtering (case-insensitive)
-        reserved_words_lower = {w.lower() for w in KQL_RESERVED_WORDS}
-
-        # 5. Get CAG context (includes schema + similar queries + join hints from memory)
-        cag_context = memory_manager.get_relevant_context(cluster_url, database, natural_language_query)
-
-        # 6. Find similar successful queries from memory for pattern matching
+        # 3. Get similar queries for few-shot context
         similar_queries = memory_manager.find_similar_queries(cluster_url, database, natural_language_query, limit=3)
 
-        # 7. Try LLM-based query generation (falls back to schema-only if unavailable)
-        from .ai_prompts import build_generation_prompt, KQL_SYSTEM_PROMPT, extract_kql_from_response
+        # 4. Get CAG context
+        cag_context = memory_manager.get_relevant_context(cluster_url, database, natural_language_query)
+
+        # 5. Generate KQL — use multi-table prompt when there are multiple candidates
+        from .ai_prompts import (
+            build_generation_prompt, build_multi_table_prompt,
+            KQL_SYSTEM_PROMPT, MULTI_TABLE_SYSTEM_PROMPT,
+            extract_kql_from_response, extract_table_and_kql,
+        )
         from .llm_client import generate_kql
 
-        prompt = build_generation_prompt(
-            nl_query=natural_language_query,
-            schema=schema_info,
-            table_name=target_table,
-            similar_queries=similar_queries,
-        )
+        final_query = None
+        method = None
 
-        llm_response = await generate_kql(KQL_SYSTEM_PROMPT, prompt)
-        if llm_response:
-            final_query = extract_kql_from_response(llm_response)
-            method = "llm_generated"
-            columns_used = [c for c in all_schema_columns if c.lower() in final_query.lower()]
-            logger.info("LLM-generated KQL: %s", final_query)
+        if len(candidate_tables) == 1:
+            # Single candidate — use existing single-table prompt
+            if not target_table:
+                target_table = candidate_tables[0]["table"]
+            schema_info = {"columns": candidate_tables[0]["columns"]}
+
+            prompt = build_generation_prompt(
+                nl_query=natural_language_query,
+                schema=schema_info,
+                table_name=target_table,
+                similar_queries=similar_queries,
+            )
+            llm_response = await generate_kql(KQL_SYSTEM_PROMPT, prompt)
+            if llm_response:
+                final_query = extract_kql_from_response(llm_response)
+                method = "llm_generated"
+                logger.info("LLM-generated KQL: %s", final_query)
         else:
-            # 8. Fallback: schema-only column matching (when LLM is unavailable)
+            # Multiple candidates — let the LLM pick the table
+            candidate_names = [ct["table"] for ct in candidate_tables]
+            logger.info("Asking LLM to select from %d candidate tables: %s",
+                       len(candidate_names), candidate_names)
+
+            prompt = build_multi_table_prompt(
+                nl_query=natural_language_query,
+                candidate_tables=candidate_tables,
+                similar_queries=similar_queries,
+            )
+            llm_response = await generate_kql(MULTI_TABLE_SYSTEM_PROMPT, prompt)
+            if llm_response:
+                chosen_table, kql = extract_table_and_kql(llm_response, candidate_names)
+                if chosen_table:
+                    target_table = chosen_table
+                    final_query = kql
+                    method = "llm_multi_table"
+                    logger.info("LLM selected table '%s' from %d candidates", target_table, len(candidate_names))
+                    logger.info("LLM-generated KQL: %s", final_query)
+                else:
+                    # LLM didn't clearly pick — fall back to top-1 semantic
+                    target_table = candidate_tables[0]["table"]
+                    final_query = kql
+                    method = "llm_generated"
+                    logger.warning("LLM did not specify table, falling back to '%s'", target_table)
+
+            if not llm_response:
+                # LLM unavailable — use name-match heuristic before top-1
+                nl_lower = natural_language_query.lower()
+                for ct in candidate_tables:
+                    if re.search(r'\b' + re.escape(ct["table"].lower()) + r'\b', nl_lower):
+                        target_table = ct["table"]
+                        logger.info("LLM unavailable, selected table '%s' via name match in query", target_table)
+                        break
+                if not target_table:
+                    target_table = candidate_tables[0]["table"]
+                    logger.info("LLM unavailable, falling back to top semantic match '%s'", target_table)
+
+        # 6. Resolve schema columns for the chosen table
+        chosen_info = next((ct for ct in candidate_tables if ct["table"] == target_table), None)
+        schema_columns = chosen_info["columns"] if chosen_info else {}
+        if not schema_columns:
+            schema_info = await schema_manager.get_table_schema(cluster_url, database, target_table)
+            schema_columns = schema_info.get("columns", {}) if schema_info else {}
+
+        col_map = {c.lower(): c for c in schema_columns.keys()}
+        all_schema_columns = list(schema_columns.keys())
+        reserved_words_lower = {w.lower() for w in KQL_RESERVED_WORDS}
+
+        if final_query:
+            columns_used = [c for c in all_schema_columns if c.lower() in final_query.lower()]
+        else:
+            # Schema-only fallback (LLM was unavailable)
             logger.info("LLM unavailable, falling back to schema-only query generation")
 
             nl_words = set(re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', natural_language_query.lower()))
@@ -450,14 +510,12 @@ async def _generate_kql_from_natural_language(
                 logger.info("No specific columns matched from NL query for '%s', using schema columns: %s",
                            target_table, default_cols)
 
-        # 10. Build structured response with special tokens for LLM parsing
-        # Format columns with special tokens for better semantic understanding
+        # 7. Build structured response with special tokens for LLM parsing
         columns_with_tokens = [
             f"{SPECIAL_TOKENS['COLUMN']}:{col}|{SPECIAL_TOKENS['TYPE']}:{schema_columns.get(col, {}).get('data_type', 'unknown')}"
             for col in columns_used
         ]
-        
-        # Build schema context with tokens
+
         schema_context = (
             f"{SPECIAL_TOKENS['CLUSTER_START']}{cluster_url}{SPECIAL_TOKENS['CLUSTER_END']}"
             f"{SPECIAL_TOKENS['SEPARATOR']}"
@@ -469,7 +527,7 @@ async def _generate_kql_from_natural_language(
         return {
             "success": True,
             "query": f"{SPECIAL_TOKENS['QUERY_START']}{final_query}{SPECIAL_TOKENS['QUERY_END']}",
-            "query_plain": final_query,  # Plain query without tokens for direct execution
+            "query_plain": final_query,
             "generation_method": method,
             "target_table": target_table,
             "schema_validated": True,

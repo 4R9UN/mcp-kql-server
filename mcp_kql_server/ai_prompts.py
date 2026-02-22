@@ -636,6 +636,166 @@ def build_generation_prompt(
     return "\n".join(prompt_parts)
 
 
+# Multi-table system prompt: reuses KQL_SYSTEM_PROMPT and adds table selection rule.
+MULTI_TABLE_SYSTEM_PROMPT = KQL_SYSTEM_PROMPT.replace(
+    "OUTPUT FORMAT:\nReturn ONLY the KQL query, nothing else. No explanations, no markdown, just the query.",
+    """7. **Table Selection**: When multiple candidate tables are provided,
+   choose the one whose name and columns BEST match the user's intent.
+   Prefer exact or near-exact table name matches over partial matches.
+
+OUTPUT FORMAT:
+Line 1: TABLE: <chosen_table_name>
+Line 2+: The KQL query only. No explanations, no markdown.""",
+)
+
+
+def build_multi_table_prompt(
+    nl_query: str,
+    candidate_tables: List[Dict[str, Any]],
+    similar_queries: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Build prompt for KQL generation with multiple candidate tables.
+
+    The LLM picks the best table and generates a query for it in one call.
+
+    Args:
+        nl_query: Natural language query from user.
+        candidate_tables: List of dicts ``{table, columns, score}`` where
+            *columns* is the full columns_json dict from the schema store.
+        similar_queries: Past similar queries for few-shot learning.
+
+    Returns:
+        Formatted prompt string.
+    """
+    prompt_parts: list[str] = []
+
+    prompt_parts.append("CANDIDATE TABLES (pick the best match for the user's request):")
+    prompt_parts.append("")
+
+    for i, table_info in enumerate(candidate_tables):
+        table_name = table_info["table"]
+        columns = table_info.get("columns", {})
+        score = table_info.get("score", 0)
+
+        prompt_parts.append(f"--- Table {i + 1}: {table_name} (relevance: {score:.2f}) ---")
+        prompt_parts.append("Columns:")
+
+        for col_name, col_info in list(columns.items())[:15]:
+            if isinstance(col_info, dict):
+                data_type = col_info.get("data_type", "unknown")
+                col_line = f"  - {col_name} ({data_type})"
+
+                sample_values = col_info.get("sample_values", [])
+                if sample_values:
+                    samples_str = ", ".join(str(v) for v in sample_values[:2])
+                    col_line += f" [e.g. {samples_str}]"
+
+                dynamic_fields = col_info.get("dynamic_fields")
+                if dynamic_fields and data_type.lower() == "dynamic":
+                    sf_names = list(dynamic_fields.keys())[:5]
+                    col_line += f" {{sub: {', '.join(sf_names)}}}"
+            else:
+                col_line = f"  - {col_name} (string)"
+            prompt_parts.append(col_line)
+
+        remaining = len(columns) - 15
+        if remaining > 0:
+            prompt_parts.append(f"  ... and {remaining} more columns")
+        prompt_parts.append("")
+
+    # Instructions
+    prompt_parts.append("INSTRUCTIONS:")
+    prompt_parts.append("1. Pick the table that BEST matches the user's request")
+    prompt_parts.append("2. Output TABLE: <table_name> on the first line")
+    prompt_parts.append("3. Then output ONLY the KQL query using that table's columns")
+    prompt_parts.append("4. Use ONLY columns from the chosen table's schema above")
+    prompt_parts.append("5. Column names are CASE-SENSITIVE - use exact capitalization")
+    prompt_parts.append("")
+
+    # Similar past queries
+    if similar_queries:
+        prompt_parts.append("RELEVANT PAST QUERIES:")
+        for q in similar_queries[:2]:
+            desc = q.get("description", "")
+            query = q.get("query", "").strip()
+            if desc and query:
+                prompt_parts.append(f"// {desc}")
+                prompt_parts.append(query)
+                prompt_parts.append("")
+
+    # Few-shot examples (condensed)
+    prompt_parts.append("GENERAL EXAMPLES:")
+    for example in FEW_SHOT_EXAMPLES[:2]:
+        prompt_parts.append(f"User: {example['description']}")
+        prompt_parts.append(f"KQL: {example['query']}")
+        prompt_parts.append("")
+
+    # User request
+    prompt_parts.append("USER REQUEST:")
+    prompt_parts.append(nl_query)
+    prompt_parts.append("")
+    prompt_parts.append("TABLE and KQL Query:")
+
+    return "\n".join(prompt_parts)
+
+
+def extract_table_and_kql(
+    response: str,
+    candidate_table_names: List[str],
+) -> tuple:
+    """Extract chosen table name and KQL query from a multi-table LLM response.
+
+    Expected format::
+
+        TABLE: chosen_table_name
+        table_name | where ... | project ...
+
+    Falls back to inferring the table from the first token of the KQL query.
+
+    Args:
+        response: Raw LLM response string.
+        candidate_table_names: Valid table names to validate against.
+
+    Returns:
+        ``(chosen_table_name | None, kql_query_string)``
+    """
+    import re
+
+    clean = response.strip()
+
+    # Strip markdown code fences if present
+    if "```" in clean:
+        pattern = r"```(?:kql)?\s*\n(.*?)\n```"
+        matches = re.findall(pattern, clean, re.DOTALL)
+        if matches:
+            clean = matches[0].strip()
+
+    chosen_table: Optional[str] = None
+    kql_query = clean
+
+    table_lower_map = {t.lower(): t for t in candidate_table_names}
+    lines = clean.split("\n")
+
+    # Try to extract TABLE: line
+    if lines and lines[0].strip().upper().startswith("TABLE:"):
+        table_part = lines[0].split(":", 1)[1].strip()
+        if table_part.lower() in table_lower_map:
+            chosen_table = table_lower_map[table_part.lower()]
+        kql_query = "\n".join(lines[1:]).strip()
+
+    # Fallback: infer from the first token of the KQL (the table name in "table | ...")
+    if chosen_table is None and kql_query:
+        first_token = kql_query.split("|")[0].strip().split()[0] if kql_query.split("|")[0].strip() else ""
+        first_token = first_token.strip("['\"]\t ")
+        if first_token.lower() in table_lower_map:
+            chosen_table = table_lower_map[first_token.lower()]
+
+    # Clean up the KQL part
+    kql_query = extract_kql_from_response(kql_query)
+
+    return chosen_table, kql_query
+
+
 def build_schema_description_prompt(
     table_name: str,
     columns: Dict[str, Any]
