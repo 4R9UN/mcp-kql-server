@@ -1273,6 +1273,8 @@ class SchemaManager:
         1. Top-level columns in other tables
         2. Dynamic sub-fields in other tables' dynamic columns (bidirectional)
         """
+        from .execute_kql import _is_etl_metadata_column, _GENERIC_COLUMNS
+
         join_hints = []
         schemas = self.memory_manager._get_database_schema(cluster, database)
 
@@ -1304,7 +1306,7 @@ class SchemaManager:
             # Check each of our sub-fields against the match targets
             for field_name, field_info in sub_fields.items():
                 field_lower = field_name.lower()
-                if field_lower not in match_targets:
+                if field_lower not in match_targets or field_lower in _GENERIC_COLUMNS or _is_etl_metadata_column(field_lower):
                     continue
 
                 matched_name, matched_expr, is_dynamic_match = match_targets[field_lower]

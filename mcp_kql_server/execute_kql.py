@@ -550,6 +550,14 @@ _GENERIC_COLUMNS = frozenset({
     'id', '_billedsize',
 })
 
+# Substrings that identify ETL metadata columns (e.g. Airbyte) — poor join keys
+_ETL_METADATA_SUBSTRINGS = ('airbyte',)
+
+
+def _is_etl_metadata_column(col_lower: str) -> bool:
+    """Return True if the column name contains an ETL metadata substring."""
+    return any(sub in col_lower for sub in _ETL_METADATA_SUBSTRINGS)
+
 
 def _compute_column_join_confidence(
     col_name: str, col_info_a: Dict[str, Any], col_info_b: Dict[str, Any]
@@ -598,7 +606,7 @@ def _discover_column_name_joins(
         our_columns: Dict[str, tuple] = {}
         for col_name, col_info in columns.items():
             col_lower = col_name.lower()
-            if col_lower not in _GENERIC_COLUMNS:
+            if col_lower not in _GENERIC_COLUMNS and not _is_etl_metadata_column(col_lower):
                 our_columns[col_lower] = (col_name, col_info if isinstance(col_info, dict) else {})
 
         if not our_columns:
@@ -618,7 +626,7 @@ def _discover_column_name_joins(
 
             for other_col_name, other_col_info in other_columns.items():
                 other_lower = other_col_name.lower()
-                if other_lower not in our_columns or other_lower in _GENERIC_COLUMNS:
+                if other_lower not in our_columns or other_lower in _GENERIC_COLUMNS or _is_etl_metadata_column(other_lower):
                     continue
 
                 our_col_name, our_col_info = our_columns[other_lower]
