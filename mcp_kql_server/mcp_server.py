@@ -71,7 +71,7 @@ async def execute_kql_query(
     2. Natural Language: Set query="Find top 10 users", generate_query=True
     
     IMPORTANT:
-    - Always run 'schema_memory' with 'list_tables' first to discover available tables
+    - Always run 'list_tables' first to discover available tables
     - Use 'schema_memory' with 'discover' to cache table schemas before querying
     - The tool validates queries against cached schema to prevent errors
 
@@ -562,6 +562,38 @@ async def _generate_kql_from_natural_language(
     except (ValueError, KeyError, RuntimeError) as e:
         logger.error("NL2KQL generation error: %s", e, exc_info=True)
         return {"success": False, "error": str(e), "query": ""}
+
+
+@mcp.tool()
+async def list_tables(
+    cluster_url: str,
+    database: str,
+) -> str:
+    """
+    List all tables available in an Azure Data Explorer database.
+
+    Use this tool FIRST to discover what tables exist before writing or generating queries.
+    Returns the complete list of table names in the database.
+
+    AUTHENTICATION: Uses Azure CLI authentication. Run 'az login' before using.
+
+    Args:
+        cluster_url: Kusto cluster URL (e.g., 'https://cluster.region.kusto.windows.net')
+        database: Database name
+
+    Returns:
+        JSON with list of all table names in the database
+    """
+    try:
+        if not kusto_manager_global or not kusto_manager_global.get("authenticated"):
+            return json.dumps({
+                "success": False,
+                "error": "Authentication required",
+                "suggestions": ["Run 'az login' to authenticate"]
+            })
+        return await _schema_list_tables_operation(cluster_url, database)
+    except (ValueError, RuntimeError, OSError) as e:
+        return json.dumps({"success": False, "error": str(e)})
 
 
 @mcp.tool()
@@ -1231,7 +1263,7 @@ def main():
             logger.info("[OK] MCP KQL Server starting in limited mode")
 
         # Log available tools
-        logger.info("Available tools: execute_kql_query, schema_memory")
+        logger.info("Available tools: execute_kql_query, list_tables, schema_memory")
         logger.info("=" * 60)
 
         # Select transport based on environment (default: stdio for local dev)
