@@ -107,8 +107,48 @@ async def discover(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+async def enrich(request: Request) -> JSONResponse:
+    """
+    Enrich schema descriptions with LLM-generated business context.
+
+    POST /enrich
+    {
+        "cluster_url": "https://...",   # optional, defaults to KUSTO_CLUSTER_URL env
+        "database": "mydb"              # optional, defaults to KUSTO_DEFAULT_DATABASE env
+    }
+    """
+    from .constants import KUSTO_CLUSTER_URL, KUSTO_DEFAULT_DATABASE
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    cluster_url = body.get("cluster_url") or KUSTO_CLUSTER_URL
+    database = body.get("database") or KUSTO_DEFAULT_DATABASE
+
+    if not cluster_url:
+        return JSONResponse({"error": "No cluster_url provided and KUSTO_CLUSTER_URL env not set"}, status_code=400)
+    if not database:
+        return JSONResponse({"error": "No database provided and KUSTO_DEFAULT_DATABASE env not set"}, status_code=400)
+
+    from .mcp_server import schema_memory
+
+    try:
+        result = await schema_memory.fn(
+            operation="enrich_descriptions",
+            cluster_url=cluster_url,
+            database=database,
+        )
+        return Response(content=result, media_type="application/json")
+    except Exception as e:
+        logger.error("REST API enrich error: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 rest_routes = [
     Route("/health", health, methods=["GET"]),
     Route("/query", query, methods=["POST"]),
     Route("/discover", discover, methods=["POST"]),
+    Route("/enrich", enrich, methods=["POST"]),
 ]

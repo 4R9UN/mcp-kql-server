@@ -346,6 +346,9 @@ async def _generate_kql_from_natural_language(
     try:
         # 1. Find relevant tables from schema memory using semantic search
         relevant_tables = memory_manager.find_relevant_tables(cluster_url, database, natural_language_query, limit=5)
+        logger.info("NL2KQL: relevant_tables=%d, cluster=%s, database=%s, query=%.100s",
+                     len(relevant_tables) if relevant_tables else 0,
+                     cluster_url, database, natural_language_query)
 
         # 2. Build candidate tables list
         # Priority: explicit table_name > multi-table LLM selection > regex fallback
@@ -367,15 +370,28 @@ async def _generate_kql_from_natural_language(
                 }
         elif relevant_tables:
             candidate_tables = relevant_tables
+            logger.info("NL2KQL: using semantic search results (%d tables)", len(candidate_tables))
         else:
-            # Fallback: extract potential table name from NL query
-            potential_tables = re.findall(r'\b([A-Z][A-Za-z0-9_]*)\b', natural_language_query)
-            if potential_tables:
-                fallback = potential_tables[0]
-                schema_info = await schema_manager.get_table_schema(cluster_url, database, fallback)
-                if schema_info and schema_info.get("columns"):
-                    candidate_tables = [{"table": fallback, "columns": schema_info["columns"], "score": 0.0}]
-                    target_table = fallback
+            # Fallback 1: Use all cached schemas from PostgreSQL.
+            # _get_database_schema() returns tables + full column JSON (~10ms, 5-min cache).
+            logger.warning("NL2KQL: semantic search empty, entering fallback path")
+            try:
+                all_schemas = memory_manager._get_database_schema(cluster_url, database)
+                if all_schemas:
+                    for schema in all_schemas[:20]:
+                        candidate_tables.append({
+                            "table": schema["table"],
+                            "columns": schema["columns"],
+                            "score": 0.0,
+                        })
+                    logger.info("Fallback: loaded %d tables from %d cached schemas in PG",
+                                len(candidate_tables), len(all_schemas))
+                else:
+                    logger.warning("Fallback: no cached schemas found for cluster=%s database=%s",
+                                   cluster_url, database)
+            except Exception as e:
+                logger.warning("Fallback schema memory lookup failed: %s", e)
+
 
         if not candidate_tables:
             return {
@@ -695,11 +711,18 @@ async def schema_memory(
                     "error": "cluster_url and database are required for refresh_schema operation"
                 })
             return await _schema_refresh_operation(cluster_url, database)
+        elif operation == "enrich_descriptions":
+            if not cluster_url or not database:
+                return json.dumps({
+                    "success": False,
+                    "error": "cluster_url and database are required for enrich_descriptions operation"
+                })
+            return await _schema_enrich_descriptions_operation(cluster_url, database)
         else:
             return json.dumps({
                 "success": False,
                 "error": f"Unknown operation: {operation}",
-                "available_operations": ["discover", "list_tables", "get_context", "dynamic_fields", "generate_report", "clear_cache", "get_stats", "refresh_schema"]
+                "available_operations": ["discover", "list_tables", "get_context", "dynamic_fields", "generate_report", "clear_cache", "get_stats", "refresh_schema", "enrich_descriptions"]
             })
 
     except (ValueError, KeyError, RuntimeError) as e:
@@ -1138,6 +1161,43 @@ async def _schema_get_stats_operation() -> str:
             "success": False,
             "error": str(e)
         })
+
+async def _schema_enrich_descriptions_operation(cluster_url: str, database: str) -> str:
+    """Enrich schema descriptions using LLM for better semantic search."""
+    from .llm_client import generate_descriptions
+
+    # Get schemas without descriptions from PG (no Kusto queries)
+    schemas = memory_manager.get_schemas_without_description(cluster_url, database)
+    if not schemas:
+        return json.dumps({"success": True, "message": "All schemas already have descriptions", "enriched": 0})
+
+    batch_size = 30
+    total_enriched = 0
+
+    for i in range(0, len(schemas), batch_size):
+        batch = schemas[i:i + batch_size]
+        descriptions = await generate_descriptions(batch)
+
+        for schema in batch:
+            desc = descriptions.get(schema["table"])
+            if desc:
+                memory_manager.store_schema(
+                    cluster_url, database, schema["table"],
+                    {"columns": schema["columns"]},
+                    description=desc,
+                )
+                total_enriched += 1
+
+        logger.info("Enriched descriptions batch %d-%d: %d/%d tables",
+                     i, i + len(batch), len(descriptions), len(batch))
+
+    return json.dumps({
+        "success": True,
+        "message": f"Enriched {total_enriched} of {len(schemas)} schemas",
+        "enriched": total_enriched,
+        "total": len(schemas),
+    })
+
 
 async def _schema_refresh_operation(cluster_url: str, database: str) -> str:
     """Proactively refresh schema for a database."""

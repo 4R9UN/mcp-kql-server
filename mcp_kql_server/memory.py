@@ -230,6 +230,7 @@ class MemoryManager:
         """Store or update a table schema with embedding and description."""
         if not self._db_available:
             return
+        cluster = self.normalize_cluster_uri(cluster)
 
         columns = schema.get("columns", {})
 
@@ -245,9 +246,12 @@ class MemoryManager:
                     normalized_cols[col] = {"data_type": "string"}
             columns = normalized_cols
 
-        # Generate embedding for table (name + column names + dynamic sub-field names)
+        # Generate embedding for table — use description if available for better semantic search
         col_names = " ".join(columns.keys())
-        embedding_text = f"Table {table} contains columns: {col_names}"
+        if description:
+            embedding_text = f"{table}: {description}. Columns: {col_names}"
+        else:
+            embedding_text = f"Table {table} contains columns: {col_names}"
 
         # Include dynamic sub-field names for richer semantic search
         dynamic_paths = []
@@ -261,6 +265,14 @@ class MemoryManager:
         embedding = generate_embedding(embedding_text)
 
         try:
+            # Normalize any existing row with trailing-slash cluster URL
+            # so the ON CONFLICT upsert below matches correctly
+            with self._get_conn() as cur:
+                cur.execute(f"""
+                    UPDATE {self._prefix}schemas SET cluster = %s
+                    WHERE cluster = %s AND database = %s AND table_name = %s
+                """, (cluster, cluster + '/', database, table))
+
             # If description is not provided, try to preserve existing one
             if description is None:
                 with self._get_conn() as cur:
@@ -294,6 +306,7 @@ class MemoryManager:
         """Store a successful query with its description and embedding."""
         if not self._db_available:
             return
+        cluster = self.normalize_cluster_uri(cluster)
 
         embedding = generate_embedding(f"{description} {query}")
 
@@ -332,10 +345,16 @@ class MemoryManager:
                              query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """Find tables semantically related to the query using pgvector."""
         if not self._db_available:
+            logger.warning("find_relevant_tables: DB not available, returning empty")
             return []
+        cluster = self.normalize_cluster_uri(cluster)
+
+        logger.info("find_relevant_tables: cluster=%s, database=%s, query=%.100s",
+                     cluster, database, query)
 
         query_embedding = generate_embedding(query)
         if query_embedding is None:
+            logger.warning("find_relevant_tables: embedding generation returned None")
             return []
 
         try:
@@ -344,7 +363,7 @@ class MemoryManager:
                     SELECT table_name, columns_json,
                            1 - (embedding <=> %s::vector) AS similarity
                     FROM {self._prefix}schemas
-                    WHERE cluster = %s AND database = %s
+                    WHERE RTRIM(cluster, '/') = %s AND database = %s
                       AND embedding IS NOT NULL
                     ORDER BY embedding <=> %s::vector
                     LIMIT %s
@@ -358,9 +377,33 @@ class MemoryManager:
                         "score": float(row[2])
                     })
 
+            if results:
+                top_tables = [(r["table"], f'{r["score"]:.4f}') for r in results[:3]]
+                logger.info("find_relevant_tables: found %d results, top=%s",
+                             len(results), top_tables)
+            else:
+                # Diagnose why 0 results: check schema count for this cluster+database
+                try:
+                    with self._get_conn() as cur2:
+                        cur2.execute(f"""
+                            SELECT COUNT(*), COUNT(embedding)
+                            FROM {self._prefix}schemas
+                            WHERE RTRIM(cluster, '/') = %s AND database = %s
+                        """, (cluster, database))
+                        row = cur2.fetchone()
+                        logger.warning(
+                            "find_relevant_tables: 0 results! schemas_in_pg=%s, "
+                            "with_embedding=%s, cluster_filter=%s, database_filter=%s",
+                            row[0] if row else '?', row[1] if row else '?',
+                            cluster, database,
+                        )
+                except Exception:
+                    logger.warning("find_relevant_tables: 0 results "
+                                   "(could not query schema count)")
+
             return results
         except Exception as e:
-            logger.error("Failed to find relevant tables: %s", e)
+            logger.error("find_relevant_tables failed: %s", e)
             return []
 
     def find_similar_queries(self, cluster: str, database: str,
@@ -368,6 +411,7 @@ class MemoryManager:
         """Find similar past queries using pgvector similarity search."""
         if not self._db_available:
             return []
+        cluster = self.normalize_cluster_uri(cluster)
 
         query_embedding = generate_embedding(query)
         if query_embedding is None:
@@ -379,7 +423,7 @@ class MemoryManager:
                     SELECT query, description,
                            1 - (embedding <=> %s::vector) AS similarity
                     FROM {self._prefix}queries
-                    WHERE cluster = %s AND database = %s
+                    WHERE RTRIM(cluster, '/') = %s AND database = %s
                       AND embedding IS NOT NULL
                     ORDER BY embedding <=> %s::vector
                     LIMIT %s
@@ -472,6 +516,7 @@ class MemoryManager:
 
     def _get_database_schema(self, cluster: str, database: str) -> List[Dict[str, Any]]:
         """Get schema from PostgreSQL with in-memory caching."""
+        cluster = self.normalize_cluster_uri(cluster)
         cache_key = f"db_schema_{cluster}_{database}"
         # Simple in-memory cache check
         if cache_key in self._schema_cache:
@@ -485,7 +530,7 @@ class MemoryManager:
         try:
             with self._get_conn() as cur:
                 cur.execute(
-                    f"SELECT table_name, columns_json FROM {self._prefix}schemas WHERE cluster = %s AND database = %s",
+                    f"SELECT table_name, columns_json FROM {self._prefix}schemas WHERE RTRIM(cluster, '/') = %s AND database = %s",
                     (cluster, database)
                 )
                 schemas = [{"table": row[0], "columns": json.loads(row[1])} for row in cur.fetchall()]
@@ -496,6 +541,24 @@ class MemoryManager:
         # Cache result
         self._schema_cache[cache_key] = {'data': schemas, 'ts': datetime.now()}
         return schemas
+
+    def get_schemas_without_description(self, cluster: str, database: str) -> list:
+        """Get all schemas that have NULL description for a cluster/database."""
+        if not self._db_available:
+            return []
+        cluster = self.normalize_cluster_uri(cluster)
+        try:
+            with self._get_conn() as cur:
+                cur.execute(f"""
+                    SELECT table_name, columns_json
+                    FROM {self._prefix}schemas
+                    WHERE RTRIM(cluster, '/') = %s AND database = %s
+                      AND description IS NULL
+                """, (cluster, database))
+                return [{"table": row[0], "columns": json.loads(row[1])} for row in cur.fetchall()]
+        except Exception as e:
+            logger.error("get_schemas_without_description failed: %s", e)
+            return []
 
     def get_relevant_context(self, cluster: str, database: str, user_query: str, max_tables: int = 20) -> str:
         """
