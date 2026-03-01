@@ -345,7 +345,7 @@ async def _generate_kql_from_natural_language(
     
     try:
         # 1. Find relevant tables from schema memory using semantic search
-        relevant_tables = memory_manager.find_relevant_tables(cluster_url, database, natural_language_query, limit=5)
+        relevant_tables = memory_manager.find_relevant_tables(cluster_url, database, natural_language_query, limit=15)
         logger.info("NL2KQL: relevant_tables=%d, cluster=%s, database=%s, query=%.100s",
                      len(relevant_tables) if relevant_tables else 0,
                      cluster_url, database, natural_language_query)

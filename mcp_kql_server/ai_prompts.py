@@ -48,6 +48,14 @@ CRITICAL RULES:
    - Use parse_json(StringCol) to convert a JSON string to dynamic
    - When dynamic sub-fields are listed in the schema, prefer using them directly
 
+7. **String Matching**: Use `contains` for partial/fuzzy matching, NOT `==`
+   - ✅ CORRECT: `where VendorName contains "Acme"` (matches "Acme Corp", "Acme Inc", "Acme Solutions LLC", etc.)
+   - ❌ WRONG: `where VendorName == "Acme"` (misses variants with suffixes like Inc, LLC, Ltd, Corp)
+   - Use `==` ONLY when you need an exact, full-string match
+   - For case-insensitive matching: `contains` is case-insensitive by default
+   - For case-sensitive matching: use `contains_cs`
+   - When searching for a company/vendor/person name, ALWAYS use `contains` since names often have suffixes (Inc, LLC, Ltd, Corp) or variations
+
 OUTPUT FORMAT:
 Return ONLY the KQL query, nothing else. No explanations, no markdown, just the query."""
 
