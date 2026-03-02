@@ -68,8 +68,6 @@ async def generate_kql(system_prompt: str, user_prompt: str) -> str | None:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.2,
-            max_tokens=500,
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -116,8 +114,6 @@ async def generate_descriptions(tables: list[dict]) -> dict[str, str]:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.3,
-            max_tokens=4000,
         )
 
         # Parse "table_name | description" lines
