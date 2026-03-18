@@ -17,12 +17,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import numpy as np
-from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
 from azure.kusto.data.exceptions import KustoServiceError
 
 # Constants import
 from .constants import DEFAULT_QUERY_TIMEOUT
 from .memory import get_memory_manager
+from .performance import get_connection_pool
 from .utils import (
     extract_cluster_and_database_from_query,
     extract_tables_from_query,
@@ -37,6 +37,17 @@ logger = logging.getLogger(__name__)
 
 # Import schema validator at module level - now from memory.py
 _schema_validator = None
+
+
+class _PoolCacheShim(dict):
+    """Compatibility shim for tests/helpers that expect a clearable client cache."""
+
+    def clear(self):
+        get_connection_pool().close_all()
+        super().clear()
+
+
+_client_cache = _PoolCacheShim()
 
 def get_schema_validator():
     """Lazy load schema validator to avoid circular imports."""
@@ -98,19 +109,11 @@ def validate_query(query: str) -> Tuple[str, str]:
 
 
 # Use centralized normalize_cluster_uri from utils.py
-# Client cache for pooling
-_client_cache = {}
-
-def _get_kusto_client(cluster_url: str) -> KustoClient:
-    """Create and authenticate a Kusto client with pooling."""
+def _get_kusto_client(cluster_url: str) -> Any:
+    """Get a pooled Kusto client."""
     normalized_url = normalize_cluster_uri(cluster_url)
-
-    if normalized_url not in _client_cache:
-        logger.info("Creating new Kusto client for %s", normalized_url)
-        kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(normalized_url)
-        _client_cache[normalized_url] = KustoClient(kcsb)
-
-    return _client_cache[normalized_url]
+    pool = get_connection_pool()
+    return pool.get_client(normalized_url)
 
 def _parse_kusto_response(response) -> pd.DataFrame:
     """Parse a Kusto response into a pandas DataFrame."""
@@ -149,6 +152,7 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _time
     cluster_url = normalize_cluster_uri(cluster)
     logger.info("Executing KQL on %s/%s: %s...", cluster_url, database, kql_query[:150])
 
+    get_connection_pool().register_health_check_database(cluster_url, database)
     client = _get_kusto_client(cluster_url)
     start_time = time.time()
     try:
@@ -470,7 +474,12 @@ async def execute_kql_query(
         if use_cache:
             try:
                 memory = get_memory_manager()
-                cached_json = memory.get_cached_result(query)
+                cached_json = memory.get_cached_result(
+                    query,
+                    cluster=cluster,
+                    database=database,
+                    cache_namespace="legacy_execute",
+                )
                 if cached_json:
                     logger.info("Returning cached result for query")
                     return json.loads(cached_json)
@@ -555,7 +564,14 @@ async def execute_kql_query(
                 try:
 
                     memory = get_memory_manager()
-                    memory.cache_query_result(query, json.dumps(records), len(records))
+                    memory.cache_query_result(
+                        query,
+                        json.dumps(records),
+                        len(records),
+                        cluster=cluster,
+                        database=database,
+                        cache_namespace="legacy_execute",
+                    )
                 except Exception as e:
                     logger.debug("Failed to cache result: %s", e)
 

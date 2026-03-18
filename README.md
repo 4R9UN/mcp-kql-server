@@ -8,7 +8,7 @@ mcp-name: io.github.4R9UN/mcp-kql-server
 
 A Model Context Protocol (MCP) server that transforms natural language questions into optimized KQL queries with intelligent schema discovery, AI-powered caching, and seamless Azure Data Explorer integration. Simply ask questions in plain English and get instant, accurate KQL queries with context-aware results.
 
-**Latest Version: v2.1.0** - Now with schema-only NL2KQL and auto-update detection!
+**Latest Version: v2.1.1** - Now with stricter schema-grounded CAG, safer cache scoping, and runtime repair for invalid columns.
 
 <!-- Badges Section -->
 
@@ -35,12 +35,13 @@ Watch a quick demo of the MCP KQL Server in action:
 
 [![MCP KQL Server Demo](https://img.youtube.com/vi/Ca-yuThJ3Vc/0.jpg)](https://www.youtube.com/watch?v=Ca-yuThJ3Vc)
 
-## 🆕 What's New in v2.1.0
+## 🆕 What's New in v2.1.1
 
-- **🎯 Schema-Only NL2KQL**: Natural Language to KQL now uses ONLY data from schema memory - no hardcoded values
-- **🔄 Auto-Update Detection**: Checks PyPI for new versions at startup with optional auto-install
-- **📋 Clean Logs**: Removed Unicode characters for better terminal compatibility
-- **✅ Improved Accuracy**: Better column validation against discovered schema
+- **🎯 Schema-First CAG**: KQL generation now ranks tables and columns from cached schema context before building queries.
+- **🧠 Strict Table Context**: `schema_memory(operation="get_context")` can be scoped to a specific table and returns allowed/recommended columns.
+- **🩹 Schema-Grounded Repair**: Invalid client-generated KQL can be repaired against real schema columns before execution.
+- **💾 Safer Cache Isolation**: Query-result cache is scoped by query, cluster, database, and output namespace.
+- **♻️ No Redundant Reindexing**: Existing cached schemas are reused and no longer overwritten by placeholder discovery paths.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
 
@@ -50,12 +51,13 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
     - **Natural Language to KQL**: Generate KQL queries from natural language descriptions.
     - **Direct KQL Execution**: Execute raw KQL queries.
     - **Multiple Output Formats**: Supports JSON, CSV, and table formats.
-    - **Live Schema Validation**: Ensures query accuracy by using live schema discovery.
+    - **Strict Schema Validation**: Uses discovered schema memory and validation before execution.
+    - **Schema-Grounded Repair**: Repairs invalid columns only when a valid table schema can prove the replacement.
 
 - **`schema_memory`**:
     - **Schema Discovery**: Discover and cache schemas for tables.
     - **Database Exploration**: List all tables within a database.
-    - **AI Context**: Get AI-driven context for tables.
+    - **AI Context**: Get ranked CAG context for tables, with optional table-scoped strict schema output.
     - **Analysis Reports**: Generate reports with visualizations.
     - **Cache Management**: Clear or refresh the schema cache.
     - **Memory Statistics**: Get statistics about the memory usage.
@@ -106,7 +108,7 @@ graph TD
 
 ### Schema Memory Discovery Flow
 
-The `kql_schema_memory` functionality is now seamlessly integrated into the `kql_execute` tool. When you run a query, the server automatically discovers and caches the schema for any tables it hasn't seen before. This on-demand process ensures you always have the context you need without any manual steps.
+The schema memory flow is integrated into query execution, but it now reuses existing cached schema before attempting live discovery. If a table schema is already available in CAG/schema memory, the server will use that cached schema instead of re-indexing it.
 
 ```mermaid
 graph TD
@@ -238,8 +240,8 @@ For any MCP-compatible application:
 python -m mcp_kql_server
 
 # Server provides these tools:
-# - kql_execute: Execute KQL queries with AI context
-# - kql_schema_memory: Discover and cache cluster schemas
+# - execute_kql_query: Execute KQL or generate KQL from natural language
+# - schema_memory: Discover, cache, and inspect cluster schemas
 ```
 ## 🔧 Quick Start
 
@@ -264,8 +266,8 @@ The server starts immediately with:
 
 The server provides two main tools:
 
-> #### `kql_execute` - Execute KQL Queries with AI Context
-> #### `kql_schema_memory` - Discover and Cache Cluster Schemas
+> #### `execute_kql_query` - Execute KQL queries or generate KQL from natural language
+> #### `schema_memory` - Discover, refresh, and inspect cached cluster schemas
 
 
 ## 💡 Usage Examples

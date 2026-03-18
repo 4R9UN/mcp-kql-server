@@ -90,11 +90,10 @@ class TestExecuteKQL(unittest.TestCase):
         self.assertEqual(database, "your-database")
 
     @patch("mcp_kql_server.execute_kql.get_memory_manager")
-    @patch("mcp_kql_server.execute_kql.KustoClient")
-    @patch("mcp_kql_server.execute_kql.KustoConnectionStringBuilder")
+    @patch("mcp_kql_server.execute_kql._get_kusto_client")
     @patch("mcp_kql_server.execute_kql.get_knowledge_corpus")
     def test_execute_kql_query_success(
-        self, mock_get_corpus, mock_connection_builder, mock_kusto_client, mock_get_memory  # pylint: disable=unused-argument
+        self, mock_get_corpus, mock_get_kusto_client, mock_get_memory
     ):
         """Test successful KQL query execution."""
         # Mock memory manager to disable caching
@@ -104,7 +103,7 @@ class TestExecuteKQL(unittest.TestCase):
 
         # Mock Kusto client
         mock_client_instance = MagicMock()
-        mock_kusto_client.return_value = mock_client_instance
+        mock_get_kusto_client.return_value = mock_client_instance
 
         # Mock query response
         mock_response = MagicMock()
@@ -135,11 +134,10 @@ class TestExecuteKQL(unittest.TestCase):
         self.assertEqual(result[0]["TestColumn"], "test_value")
 
     @patch("mcp_kql_server.execute_kql.get_memory_manager")
-    @patch("mcp_kql_server.execute_kql.KustoClient")
-    @patch("mcp_kql_server.execute_kql.KustoConnectionStringBuilder")
+    @patch("mcp_kql_server.execute_kql._get_kusto_client")
     @patch("mcp_kql_server.execute_kql.get_knowledge_corpus")
     def test_execute_kql_query_with_visualization(
-        self, mock_get_corpus, mock_connection_builder, mock_kusto_client, mock_get_memory
+        self, mock_get_corpus, mock_get_kusto_client, mock_get_memory
     ):
         """Test KQL query execution with visualization."""
         # Mock memory manager to disable caching
@@ -149,7 +147,7 @@ class TestExecuteKQL(unittest.TestCase):
 
         # Mock Kusto client
         mock_client_instance = MagicMock()
-        mock_kusto_client.return_value = mock_client_instance
+        mock_get_kusto_client.return_value = mock_client_instance
 
         # Mock query response
         mock_response = MagicMock()
@@ -182,10 +180,9 @@ class TestExecuteKQL(unittest.TestCase):
         self.assertTrue(has_visualization)
 
     @patch("mcp_kql_server.execute_kql.get_memory_manager")
-    @patch("mcp_kql_server.execute_kql.KustoClient")
-    @patch("mcp_kql_server.execute_kql.KustoConnectionStringBuilder")
+    @patch("mcp_kql_server.execute_kql._get_kusto_client")
     def test_execute_kql_query_kusto_error(
-        self, mock_connection_builder, mock_kusto_client, mock_get_memory
+        self, mock_get_kusto_client, mock_get_memory
     ):
         """Test KQL query execution with Kusto service error."""
         # Mock memory manager to disable caching
@@ -195,7 +192,7 @@ class TestExecuteKQL(unittest.TestCase):
 
         # Mock Kusto client to raise error
         mock_client_instance = MagicMock()
-        mock_kusto_client.return_value = mock_client_instance
+        mock_get_kusto_client.return_value = mock_client_instance
         mock_client_instance.execute.side_effect = KustoServiceError("Test Kusto error")
 
         # Execute query and expect exception
@@ -203,11 +200,10 @@ class TestExecuteKQL(unittest.TestCase):
             asyncio.run(execute_kql_query(self.valid_query, use_schema_context=False))
 
     @patch("mcp_kql_server.execute_kql.get_memory_manager")
-    @patch("mcp_kql_server.execute_kql.KustoClient")
-    @patch("mcp_kql_server.execute_kql.KustoConnectionStringBuilder")
+    @patch("mcp_kql_server.execute_kql._get_kusto_client")
     @patch("mcp_kql_server.execute_kql.get_knowledge_corpus")
     def test_execute_kql_query_with_schema_context(
-        self, mock_get_corpus, mock_connection_builder, mock_kusto_client, mock_get_memory
+        self, mock_get_corpus, mock_get_kusto_client, mock_get_memory
     ):
         """Test KQL query execution with schema context."""
         # Mock memory manager to disable caching
@@ -217,7 +213,7 @@ class TestExecuteKQL(unittest.TestCase):
 
         # Mock Kusto client
         mock_client_instance = MagicMock()
-        mock_kusto_client.return_value = mock_client_instance
+        mock_get_kusto_client.return_value = mock_client_instance
 
         # Mock query response
         mock_response = MagicMock()
@@ -253,11 +249,10 @@ class TestExecuteKQL(unittest.TestCase):
         self.assertIsInstance(result, list)
 
     @patch("mcp_kql_server.execute_kql.get_memory_manager")
-    @patch("mcp_kql_server.execute_kql.KustoClient")
-    @patch("mcp_kql_server.execute_kql.KustoConnectionStringBuilder")
+    @patch("mcp_kql_server.execute_kql._get_kusto_client")
     @patch("mcp_kql_server.execute_kql.get_knowledge_corpus")
     def test_execute_kql_query_empty_results(
-        self, mock_get_corpus, mock_connection_builder, mock_kusto_client, mock_get_memory
+        self, mock_get_corpus, mock_get_kusto_client, mock_get_memory
     ):
         """Test KQL query execution with empty results."""
         # Mock memory manager to disable caching
@@ -267,7 +262,7 @@ class TestExecuteKQL(unittest.TestCase):
 
         # Mock Kusto client
         mock_client_instance = MagicMock()
-        mock_kusto_client.return_value = mock_client_instance
+        mock_get_kusto_client.return_value = mock_client_instance
 
         # Mock empty response
         mock_response = MagicMock()
@@ -292,15 +287,14 @@ class TestExecuteKQL(unittest.TestCase):
         with self.assertRaises(ValueError):
             asyncio.run(execute_kql_query(invalid_query, use_schema_context=False))
 
-    @patch("mcp_kql_server.execute_kql.KustoClient")
-    @patch("mcp_kql_server.execute_kql.KustoConnectionStringBuilder")
+    @patch("mcp_kql_server.execute_kql._get_kusto_client")
     @patch("mcp_kql_server.execute_kql.get_knowledge_corpus")
     def test_execute_kql_query_routes_management_commands(
-        self, mock_get_corpus, mock_conn_builder, mock_client_cls
+        self, mock_get_corpus, mock_get_kusto_client
     ):
         """Multi-statement script should route dot-commands to execute_mgmt."""
         mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
+        mock_get_kusto_client.return_value = mock_client
 
         # Data query primary result
         data_resp = MagicMock()
@@ -340,11 +334,10 @@ class TestExecuteKQL(unittest.TestCase):
         self.assertEqual(db, self.test_database)
 
     @patch("mcp_kql_server.execute_kql.get_memory_manager")
-    @patch("mcp_kql_server.execute_kql.KustoClient")
-    @patch("mcp_kql_server.execute_kql.KustoConnectionStringBuilder")
+    @patch("mcp_kql_server.execute_kql._get_kusto_client")
     @patch("mcp_kql_server.execute_kql.get_knowledge_corpus")
     def test_normalize_legacy_iplocation_to_geo_info(
-        self, mock_get_corpus, mock_conn_builder, mock_client_cls, mock_get_memory
+        self, mock_get_corpus, mock_get_kusto_client, mock_get_memory
     ):
         """Ensure iplocation() handling in queries."""
         # Mock memory manager to disable caching
@@ -353,7 +346,7 @@ class TestExecuteKQL(unittest.TestCase):
         mock_memory.get_cached_result.return_value = None
 
         mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
+        mock_get_kusto_client.return_value = mock_client
 
         # Mock response
         mock_response = MagicMock()

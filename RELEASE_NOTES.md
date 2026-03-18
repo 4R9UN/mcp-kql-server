@@ -2,6 +2,66 @@
 
 ---
 
+## 🚀 **v2.1.1 - Schema-Grounded CAG & Runtime Accuracy**
+
+> **Strict schema-first generation, safer cache scoping, and repair-before-execute** 
+
+**Release Date**: March 17, 2026
+**Author**: Arjun Trivedi
+**Email**: arjuntrivedi42@yahoo.com
+**Repository**: https://github.com/4R9UN/mcp-kql-server
+
+### 🚀 **What's New in v2.1.1**
+
+This release focuses on correctness and schema fidelity. The server now prefers cached schema/CAG context over re-indexing, generates KQL from ranked schema context, and can repair invalid client-generated KQL only when a real schema proves the replacement.
+
+#### **1. Stricter CAG and Schema Memory Usage**
+- **Schema-First Generation**: NL2KQL generation now uses ranked table and column context from schema memory before building candidate queries.
+- **Strict Table Context**: `schema_memory(operation="get_context")` can now be scoped to a specific table and returns:
+  - allowed columns
+  - recommended columns
+  - preferred time column
+  - compact CAG context
+- **No Redundant Reindexing**: Existing cached schema is reused before live discovery, and empty placeholder discovery paths no longer overwrite rich table schemas.
+
+#### **2. Runtime Query Accuracy**
+- **Schema-Grounded Repair**: When direct KQL contains invalid columns, the server now attempts a schema-backed repair and only executes the repaired query if it fully revalidates.
+- **Improved Join-Aware Generation**: Candidate generation now includes join-aware paths when join hints exist in memory.
+- **Generation Telemetry**: Memory stats now include generation event counts and candidate metrics for tuning.
+
+#### **3. Cache and Runtime Stability**
+- **Scoped Query Cache**: Cached results are now isolated by query text, cluster, database, and cache namespace.
+- **Safe Cache Clearing**: `schema_memory(operation="clear_cache")` now clears real cached state rather than only returning a success message.
+- **Shared Connection Pooling**: Execution paths now use the shared pool instead of a duplicate local client cache path.
+- **Safer Health Checks**: Pool health checks probe only with a registered database and avoid false recycling when no database context exists.
+
+#### **4. Repository Cleanup**
+- **Removed Scratch Docs**: Deleted ad hoc analysis documents that were not part of the shipped project docs.
+- **Version Alignment**: Package metadata, docs, server manifest, and tests are aligned to `2.1.1`.
+
+### 🐛 **Bug Fixes**
+- Fixed repeated schema writes when schema was already available in memory/CAG.
+- Prevented empty placeholder schemas from overwriting real indexed schemas.
+- Fixed direct-query failures caused by invalid generated/client column names such as non-schema time aliases.
+
+### 📦 **Installation & Upgrade**
+
+#### **New Installation**
+```bash
+pip install mcp-kql-server==2.1.1
+```
+
+#### **Upgrade from Previous Versions**
+```bash
+pip install --upgrade mcp-kql-server
+```
+
+### ✅ **Quality Assurance**
+- **Tests**: 76 passed, 1 skipped
+- **Verified**: Generation, execution, runtime cache, health-check, and package-version regression suites passed
+
+---
+
 ## 🚀 **v2.1.0 - NL2KQL Enhancement & Version Management**
 
 > **Schema-Only NL2KQL & Auto-Update Functionality** 🧠

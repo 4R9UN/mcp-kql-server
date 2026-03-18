@@ -10,6 +10,7 @@ Email: arjuntrivedi42@yahoo.com
 
 import re
 import logging
+import difflib
 from typing import Dict, List, Any
 
 from .constants import KQL_RESERVED_WORDS
@@ -121,30 +122,107 @@ class KQLValidator:
             }
 
     def _extract_tables(self, query: str) -> List[str]:
-        """Extract table names from KQL query."""
+        """
+        Extract table names from KQL query.
+        
+        Handles multiple query patterns including:
+        - Simple table references: TableName | where ...
+        - Cross-cluster: cluster('...').database('...').TableName
+        - Let blocks: let x = ...; TableName | where ...
+        - Join/union operations
+        - Bracketed table names
+        """
         tables = set()
 
-        # Pattern 1: Table at start or after pipe
+        # Pattern 1: Cross-cluster pattern (HIGHEST PRIORITY)
+        # Matches: cluster('...').database('...').TableName
+        pattern_cross_cluster = r'\.database\s*\(\s*[\'"][^\'"]+[\'"]\s*\)\s*\.([A-Za-z_][\w]*)'
+        
+        # Pattern 2: Table after semicolon (for let statements)
+        # Matches: ; TableName | ... or ;\nTableName
+        pattern_after_let = r';\s*\n?\s*([A-Za-z_][\w]*)\s*(?:\||$)'
+        
+        # Pattern 3: Table at start of line or after pipe (with MULTILINE support)
         # Matches: TableName | ..., | TableName, etc.
-        pattern1 = r'(?:^|\|\s*)([A-Za-z_][\w]*)\s*(?:\||$)'
+        pattern_line_start = r'(?:^|\|\s*)([A-Za-z_][\w]*)\s*(?:\||$)'
 
-        # Pattern 2: Join/union operations
+        # Pattern 4: Join/union operations
         # Matches: join Table, union Table, lookup Table
-        pattern2 = r'(?:join|union|lookup)\s+(?:kind\s*=\s*\w+\s+)?([A-Za-z_][\w]*)'
+        pattern_join = r'(?:join|union|lookup)\s+(?:kind\s*=\s*\w+\s+)?([A-Za-z_][\w]*)'
 
-        # Pattern 3: Bracketed table names
+        # Pattern 5: Bracketed table names
         # Matches: ['TableName'], ["TableName"]
-        pattern3 = r'\[[\'"]([\ w\s-]+)[\'"]\]'
+        pattern_bracket = r'\[[\'"]([A-Za-z_][\w\s-]+)[\'"]\]'
+        
+        # Pattern 6: Table in datatable or materialize
+        # Matches: datatable (...) [...] | ..., materialize(TableName)
+        pattern_materialize = r'materialize\s*\(\s*([A-Za-z_][\w]*)\s*\)'
 
-        for pattern in [pattern1, pattern2, pattern3]:
-            matches = re.finditer(pattern, query, re.IGNORECASE)
-            for match in matches:
-                table_name = match.group(1).strip()
-                # Filter out KQL keywords
-                if not self._is_kql_keyword(table_name):
-                    tables.add(table_name)
+        # Apply patterns with appropriate flags
+        patterns_with_flags = [
+            (pattern_cross_cluster, re.IGNORECASE),
+            (pattern_after_let, re.IGNORECASE | re.MULTILINE),
+            (pattern_line_start, re.IGNORECASE | re.MULTILINE),
+            (pattern_join, re.IGNORECASE),
+            (pattern_bracket, re.IGNORECASE),
+            (pattern_materialize, re.IGNORECASE),
+        ]
 
+        for pattern, flags in patterns_with_flags:
+            try:
+                matches = re.finditer(pattern, query, flags)
+                for match in matches:
+                    table_name = match.group(1).strip()
+                    # Filter out KQL keywords and common false positives
+                    if table_name and not self._is_kql_keyword(table_name):
+                        # Additional filter: skip variable-like names in let statements
+                        if not self._is_let_variable(query, table_name):
+                            tables.add(table_name)
+            except re.error as e:
+                logger.warning("Regex error in table extraction: %s", e)
+
+        # If no tables found, try fallback extraction
+        if not tables:
+            tables = self._fallback_table_extraction(query)
+        
+        logger.debug("Extracted tables from query: %s", list(tables))
         return list(tables)
+    
+    def _is_let_variable(self, query: str, name: str) -> bool:
+        """
+        Check if a name is defined as a let variable in the query.
+        This prevents extracting let variable names as table names.
+        """
+        # Pattern: let VariableName = ...
+        let_pattern = rf'\blet\s+{re.escape(name)}\s*='
+        return bool(re.search(let_pattern, query, re.IGNORECASE))
+    
+    def _fallback_table_extraction(self, query: str) -> set:
+        """
+        Fallback table extraction for complex queries.
+        Uses heuristics when standard patterns fail.
+        """
+        tables = set()
+        
+        # Remove comments and string literals to avoid false positives
+        cleaned = re.sub(r'//.*$', '', query, flags=re.MULTILINE)  # Remove line comments
+        cleaned = re.sub(r'/\*.*?\*/', '', cleaned, flags=re.DOTALL)  # Remove block comments
+        cleaned = re.sub(r'"[^"]*"', '""', cleaned)  # Replace string literals
+        cleaned = re.sub(r"'[^']*'", "''", cleaned)  # Replace string literals
+        
+        # Split by common KQL delimiters and look for table-like identifiers
+        # Tables typically appear: after database().TABLE or at statement boundaries
+        
+        # Look for identifiers that look like table names (PascalCase or with Events/Log suffix)
+        table_like_pattern = r'\b([A-Z][a-zA-Z0-9]*(?:Events?|Log|Table|Data|Records?)?)\b'
+        for match in re.finditer(table_like_pattern, cleaned):
+            candidate = match.group(1)
+            if (len(candidate) > 3 and 
+                not self._is_kql_keyword(candidate) and
+                not self._is_let_variable(query, candidate)):
+                tables.add(candidate)
+        
+        return tables
 
     def _is_kql_keyword(self, word: str) -> bool:
         """Check if word is a KQL keyword using centralized reserved words."""
@@ -206,14 +284,26 @@ class KQLValidator:
 
             # Extract column references for this table
             column_refs = self._extract_column_references(query, table)
+            column_names = list(columns.keys())
 
             # Validate each column reference
             for col_ref in column_refs:
                 if col_ref not in columns:
-                    errors.append(
-                        f"Column '{col_ref}' not found in table '{table}'. "
-                        f"Available columns: {', '.join(sorted(columns.keys()))}"
-                    )
+                    # Use fuzzy matching to suggest similar column names
+                    suggestions = self._find_similar_columns(col_ref, column_names)
+                    if suggestions:
+                        errors.append(
+                            f"Column '{col_ref}' not found in table '{table}'. "
+                            f"Did you mean: {', '.join(suggestions)}?"
+                        )
+                    else:
+                        # Show first 10 available columns as reference
+                        sample_cols = sorted(column_names)[:10]
+                        errors.append(
+                            f"Column '{col_ref}' not found in table '{table}'. "
+                            f"Sample columns: {', '.join(sample_cols)}"
+                            + (f"... ({len(column_names)} total)" if len(column_names) > 10 else "")
+                        )
                 else:
                     validated_count += 1
 
@@ -223,11 +313,43 @@ class KQLValidator:
             logger.warning("Table validation failed for %s: %s", table, e)
             return errors, warnings, 0
 
+    def _find_similar_columns(
+        self, 
+        invalid_col: str, 
+        valid_columns: List[str],
+        n: int = 3,
+        cutoff: float = 0.5
+    ) -> List[str]:
+        """
+        Find similar column names using fuzzy matching.
+        
+        Args:
+            invalid_col: The invalid column name from the query
+            valid_columns: List of valid column names from schema
+            n: Maximum number of suggestions to return
+            cutoff: Minimum similarity ratio (0-1) for a match
+            
+        Returns:
+            List of similar column names, sorted by similarity
+        """
+        # Use difflib for fuzzy matching
+        matches = difflib.get_close_matches(
+            invalid_col.lower(),
+            [c.lower() for c in valid_columns],
+            n=n,
+            cutoff=cutoff
+        )
+        
+        # Map back to original case
+        lower_to_original = {c.lower(): c for c in valid_columns}
+        return [lower_to_original.get(m, m) for m in matches]
+
     def _extract_column_references(self, query: str, _table: str) -> List[str]:
         """
         Extract column references from query that need validation.
         
         Only extracts columns being READ from tables, NOT aliases being CREATED.
+        Covers: WHERE, PROJECT, EXTEND, SUMMARIZE, SORT/ORDER BY, JOIN, TOP
         """
         columns = set()
         
@@ -262,6 +384,65 @@ class KQLValidator:
                 if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
                     columns.add(col_name)
         
+        # ============================================================
+        # NEW: Pattern for columns in PROJECT clause (critical fix)
+        # Handles: | project Col1, Col2, Alias = Col3
+        # ============================================================
+        project_pattern = r'\|\s*project\s+([^|]+?)(?=\||$)'
+        for match in re.finditer(project_pattern, query, re.IGNORECASE | re.DOTALL):
+            project_clause = match.group(1).strip()
+            # Parse each item in the project list
+            for col_item in self._split_by_comma_respecting_parens(project_clause):
+                col_item = col_item.strip()
+                if not col_item:
+                    continue
+                
+                if '=' in col_item:
+                    # Format: Alias = SourceColumn or Alias = expression
+                    # Extract columns from the right side (source)
+                    _, right_side = col_item.split('=', 1)
+                    source_cols = self._extract_columns_from_expression(
+                        right_side, created_aliases, aggregation_functions
+                    )
+                    columns.update(source_cols)
+                else:
+                    # Simple column reference (no alias)
+                    col_name = col_item.strip()
+                    # Check it's a valid identifier
+                    if re.match(r'^[A-Za-z_][\w]*$', col_name):
+                        if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
+                            columns.add(col_name)
+        
+        # ============================================================
+        # NEW: Pattern for project-away and project-keep
+        # All columns listed are being READ from the table
+        # ============================================================
+        project_away_pattern = r'\|\s*project-(?:away|keep)\s+([^|]+?)(?=\||$)'
+        for match in re.finditer(project_away_pattern, query, re.IGNORECASE | re.DOTALL):
+            cols_list = match.group(1).strip()
+            for col_item in self._split_by_comma_respecting_parens(cols_list):
+                col_name = col_item.strip()
+                if re.match(r'^[A-Za-z_][\w]*$', col_name):
+                    if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
+                        columns.add(col_name)
+        
+        # ============================================================
+        # NEW: Pattern for source columns in EXTEND expressions
+        # Handles: | extend NewCol = SourceCol + 1
+        # ============================================================
+        extend_pattern = r'\|\s*extend\s+([^|]+?)(?=\||$)'
+        for match in re.finditer(extend_pattern, query, re.IGNORECASE | re.DOTALL):
+            extend_clause = match.group(1).strip()
+            # Parse each assignment in the extend
+            for assignment in self._split_by_comma_respecting_parens(extend_clause):
+                if '=' in assignment:
+                    # Extract source columns from the expression (right side)
+                    _, expr = assignment.split('=', 1)
+                    source_cols = self._extract_columns_from_expression(
+                        expr, created_aliases, aggregation_functions
+                    )
+                    columns.update(source_cols)
+        
         # Pattern for columns in summarize BY clause (reading from table)
         summarize_by_pattern = r'\|\s*summarize\s+.+?\s+by\s+([^|]+?)(?=\||$)'
         for match in re.finditer(summarize_by_pattern, query, re.IGNORECASE | re.DOTALL):
@@ -294,8 +475,35 @@ class KQLValidator:
             if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
                 columns.add(col_name)
         
-        # Pattern for columns in order by / sort by (only validate if before summarize or references table columns)
-        # Skip these as they often reference summarize output columns
+        # ============================================================
+        # NEW: Pattern for SORT BY / ORDER BY columns (before summarize)
+        # Only validate columns that appear before any summarize clause
+        # ============================================================
+        # Check if query has summarize - if so, sort/order columns after may be aliases
+        has_summarize = bool(re.search(r'\|\s*summarize\s+', query, re.IGNORECASE))
+        
+        if not has_summarize:
+            # Safe to validate sort/order by columns
+            sort_pattern = r'\|\s*(?:sort|order)\s+by\s+([^|]+?)(?=\||$)'
+            for match in re.finditer(sort_pattern, query, re.IGNORECASE | re.DOTALL):
+                sort_clause = match.group(1).strip()
+                for part in sort_clause.split(','):
+                    # Remove asc/desc modifiers
+                    part = re.sub(r'\b(asc|desc|nulls\s+first|nulls\s+last)\b', '', part, flags=re.IGNORECASE)
+                    col_name = part.strip()
+                    if re.match(r'^[A-Za-z_][\w]*$', col_name):
+                        if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
+                            columns.add(col_name)
+        
+        # ============================================================
+        # NEW: Pattern for TOP N BY column
+        # Handles: | top 10 by ColumnName
+        # ============================================================
+        top_pattern = r'\|\s*top\s+\d+\s+by\s+([A-Za-z_][\w]*)'
+        for match in re.finditer(top_pattern, query, re.IGNORECASE):
+            col_name = match.group(1).strip()
+            if not self._is_kql_keyword(col_name) and col_name not in created_aliases:
+                columns.add(col_name)
         
         # Pattern for columns in join conditions
         join_pattern = r'\|\s*join\s+.+?\s+on\s+([^|]+?)(?=\||$)'
@@ -310,6 +518,80 @@ class KQLValidator:
                         columns.add(col_name)
 
         return list(columns)
+    
+    def _split_by_comma_respecting_parens(self, text: str) -> List[str]:
+        """
+        Split text by commas, but respect parentheses nesting.
+        E.g., 'a, func(b, c), d' -> ['a', 'func(b, c)', 'd']
+        """
+        result = []
+        current = []
+        depth = 0
+        
+        for char in text:
+            if char == '(':
+                depth += 1
+                current.append(char)
+            elif char == ')':
+                depth -= 1
+                current.append(char)
+            elif char == ',' and depth == 0:
+                result.append(''.join(current))
+                current = []
+            else:
+                current.append(char)
+        
+        if current:
+            result.append(''.join(current))
+        
+        return result
+    
+    def _extract_columns_from_expression(
+        self, 
+        expr: str, 
+        created_aliases: set,
+        aggregation_functions: set
+    ) -> set:
+        """
+        Extract column references from a KQL expression.
+        Filters out KQL functions, keywords, and created aliases.
+        """
+        columns = set()
+        
+        # Remove string literals to avoid false positives
+        expr = re.sub(r'"[^"]*"', '""', expr)
+        expr = re.sub(r"'[^']*'", "''", expr)
+        
+        # KQL scalar functions to exclude
+        kql_functions = {
+            'toupper', 'tolower', 'strlen', 'substring', 'strcat', 'split',
+            'replace', 'trim', 'ltrim', 'rtrim', 'extract', 'parse_json',
+            'toint', 'tolong', 'todouble', 'tostring', 'todatetime', 'totimespan',
+            'datetime', 'ago', 'now', 'bin', 'floor', 'ceiling', 'round',
+            'abs', 'sign', 'sqrt', 'pow', 'exp', 'log', 'log10',
+            'isnotempty', 'isempty', 'isnull', 'isnotnull', 'coalesce',
+            'iff', 'iif', 'case', 'pack', 'pack_all', 'dynamic',
+            'array_length', 'array_concat', 'array_slice', 'mv_expand',
+            'parse_path', 'parse_url', 'parse_urlquery', 'base64_encode_tostring',
+            'base64_decode_tostring', 'hash', 'hash_sha256', 'format_datetime',
+            'make_datetime', 'datetime_diff', 'datetime_add', 'startofday',
+            'startofweek', 'startofmonth', 'startofyear', 'endofday',
+            'gettype', 'typeof', 'toreal', 'tobool', 'toguid',
+        }
+        all_functions = kql_functions | aggregation_functions
+        
+        # Find all identifiers in the expression
+        identifiers = re.findall(r'\b([A-Za-z_][\w]*)\b', expr)
+        
+        for ident in identifiers:
+            ident_lower = ident.lower()
+            # Skip if it's a KQL function, keyword, or created alias
+            if (ident_lower not in {f.lower() for f in all_functions} and
+                not self._is_kql_keyword(ident) and
+                ident not in created_aliases):
+                columns.add(ident)
+        
+        return columns
     
     def _extract_created_aliases(self, query: str) -> set:
         """

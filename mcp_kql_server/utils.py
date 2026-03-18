@@ -598,6 +598,23 @@ class SchemaManager:
         This function is now the single source of truth for live schema discovery.
         """
         try:
+            if not _force_refresh:
+                cached_schemas = self.memory_manager._get_database_schema(cluster, database)  # pylint: disable=protected-access
+                cached_schema = next((s for s in cached_schemas if s.get("table") == table), None)
+                if cached_schema and cached_schema.get("columns"):
+                    logger.debug("Using cached schema for %s.%s from schema memory", database, table)
+                    self.memory_manager.register_table_location(table, cluster, database)
+                    return {
+                        "table_name": table,
+                        "columns": cached_schema["columns"],
+                        "discovered_at": datetime.now().isoformat(),
+                        "cluster": cluster,
+                        "database": database,
+                        "column_count": len(cached_schema["columns"]),
+                        "discovery_method": "cached_schema_memory",
+                        "schema_version": "3.1",
+                    }
+
             logger.debug("Performing enhanced schema discovery for %s.%s", database, table)
 
             # Strategy 1: Try .show table schema as json (most detailed)
@@ -1153,13 +1170,11 @@ class SchemaManager:
                 "authentication_validated": validate_auth
             }
 
-            # Store each table schema
-            # Note: .show tables only gives names, not full schema.
-            # We store what we have (names) and let full discovery happen later if needed.
+            # Register discovered table locations without overwriting existing rich schemas.
             for table_name in table_list:
-                self.memory_manager.store_schema(cluster, database, table_name, {"columns": {}})
+                self.memory_manager.register_table_location(table_name, cluster, database)
 
-            logger.info("Stored newly discovered schema for database %s with %s tables", database, len(table_list))
+            logger.info("Registered %s discovered tables for database %s", len(table_list), database)
             return db_schema_obj
 
         except Exception as discovery_error:

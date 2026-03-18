@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import difflib
 from datetime import datetime
 from typing import Dict, Optional, List, Any
 
@@ -45,6 +46,498 @@ kql_validator = KQLValidator(memory_manager, schema_manager)
 
 # Global kusto manager - will be set at startup
 kusto_manager_global = None
+
+GENERATION_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "by", "find", "for", "from", "get",
+    "how", "in", "last", "latest", "list", "me", "of", "on", "recent", "show",
+    "that", "the", "to", "top", "with"
+}
+
+
+def _tokenize_generation_text(text: str) -> List[str]:
+    """Tokenize NL queries and identifiers for ranking/generation heuristics."""
+    normalized = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', text or "")
+    tokens = re.findall(r'[A-Za-z_][A-Za-z0-9_]*', normalized.lower())
+    return [token for token in tokens if len(token) > 1 and token not in GENERATION_STOPWORDS]
+
+
+def _tokenize_identifier(name: str) -> List[str]:
+    """Split an identifier into comparable lowercase tokens."""
+    return _tokenize_generation_text(name.replace("_", " "))
+
+
+def _extract_requested_limit(nl_query: str, default: int = 10) -> int:
+    """Extract requested result size from natural language."""
+    match = re.search(r'\b(?:top|first|last)\s+(\d{1,4})\b', nl_query, re.IGNORECASE)
+    if match:
+        return max(1, min(int(match.group(1)), 500))
+    return default
+
+
+def _extract_column_suggestions(error_message: str) -> List[str]:
+    """Extract suggested replacement columns from a validator error string."""
+    if "Did you mean:" not in error_message:
+        return []
+    suggestion_text = error_message.split("Did you mean:", 1)[1].strip().rstrip("?")
+    return [part.strip() for part in suggestion_text.split(",") if part.strip()]
+
+
+def _choose_preferred_time_column(schema_columns: Dict[str, Any]) -> Optional[str]:
+    """Pick the best canonical time column from a schema."""
+    preferred_names = [
+        "TimeGenerated", "Timestamp", "ReportTime", "EventTime",
+        "FirstSeenDateTime", "LastSeenDateTime", "CreatedOn",
+    ]
+    for name in preferred_names:
+        if name in schema_columns:
+            return name
+
+    for column_name, column_def in schema_columns.items():
+        data_type = column_def.get("data_type") if isinstance(column_def, dict) else column_def
+        if str(data_type).lower() == "datetime":
+            return column_name
+    return None
+
+
+def _choose_schema_replacement(
+    invalid_column: str,
+    schema_columns: Dict[str, Any],
+    suggested_columns: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Choose the best schema-backed replacement for an invalid column."""
+    if suggested_columns:
+        for suggestion in suggested_columns:
+            if suggestion in schema_columns:
+                return suggestion
+
+    time_column = _choose_preferred_time_column(schema_columns)
+    invalid_tokens = set(_tokenize_identifier(invalid_column))
+    invalid_lower = invalid_column.lower()
+
+    if {"time", "date", "timestamp"} & invalid_tokens and time_column:
+        return time_column
+
+    ranked_candidates = []
+    for column_name in schema_columns:
+        column_tokens = set(_tokenize_identifier(column_name))
+        score = 0.0
+        score += len(invalid_tokens & column_tokens) * 2.5
+        score += 1.5 * difflib.SequenceMatcher(None, invalid_lower, column_name.lower()).ratio()
+
+        if "command" in invalid_lower and "command" in column_name.lower():
+            score += 2.0
+        if "account" in invalid_lower and "account" in column_name.lower():
+            score += 2.0
+        if "parent" in invalid_lower and "parent" in column_name.lower():
+            score += 2.0
+        if "file" in invalid_lower and "file" in column_name.lower():
+            score += 2.0
+        if "path" in invalid_lower and "path" in column_name.lower():
+            score += 2.0
+
+        ranked_candidates.append((score, column_name))
+
+    ranked_candidates.sort(reverse=True)
+    if ranked_candidates and ranked_candidates[0][0] >= 2.4:
+        return ranked_candidates[0][1]
+    return None
+
+
+async def _repair_query_with_schema_context(
+    query: str,
+    cluster_url: str,
+    database: str,
+    validation_result: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Attempt a schema-grounded repair for invalid user/client-generated KQL.
+
+    Only returns a repaired query if the rewritten query fully revalidates.
+    """
+    tables = validation_result.get("tables_used", [])
+    if len(tables) != 1:
+        return None
+
+    table_name = tables[0]
+    schema_info = await schema_manager.get_table_schema(cluster_url, database, table_name)
+    if not schema_info or not schema_info.get("columns"):
+        return None
+
+    schema_columns = schema_info["columns"]
+    repaired_query = query
+    replacements: Dict[str, str] = {}
+
+    for error in validation_result.get("errors", []):
+        match = re.search(r"Column '([^']+)' not found", error)
+        if not match:
+            continue
+
+        invalid_column = match.group(1)
+        if invalid_column in replacements:
+            continue
+
+        replacement = _choose_schema_replacement(
+            invalid_column,
+            schema_columns,
+            suggested_columns=_extract_column_suggestions(error),
+        )
+        if replacement and replacement != invalid_column:
+            repaired_query = re.sub(
+                rf"\b{re.escape(invalid_column)}\b",
+                replacement,
+                repaired_query,
+            )
+            replacements[invalid_column] = replacement
+
+    if not replacements:
+        return None
+
+    repaired_validation = await kql_validator.validate_query(
+        query=repaired_query,
+        cluster=cluster_url,
+        database=database,
+        auto_discover=False,
+    )
+    if not repaired_validation.get("valid"):
+        return None
+
+    return {
+        "query": repaired_query,
+        "replacements": replacements,
+        "schema_columns": list(schema_columns.keys())[:25],
+        "preferred_time_column": _choose_preferred_time_column(schema_columns),
+        "table_name": table_name,
+    }
+
+
+def _extract_time_window(nl_query: str) -> Optional[str]:
+    """Convert common NL time windows into KQL ago() units."""
+    lower_query = nl_query.lower()
+    match = re.search(
+        r'\b(?:last|past)\s+(\d+)\s+(minute|minutes|min|hour|hours|day|days|week|weeks|month|months)\b',
+        lower_query,
+    )
+    if match:
+        value = int(match.group(1))
+        unit = match.group(2)
+        if unit.startswith("min"):
+            return f"{value}m"
+        if unit.startswith("hour"):
+            return f"{value}h"
+        if unit.startswith("day"):
+            return f"{value}d"
+        if unit.startswith("week"):
+            return f"{value * 7}d"
+        if unit.startswith("month"):
+            return f"{value * 30}d"
+
+    if "today" in lower_query:
+        return "1d"
+    if "yesterday" in lower_query:
+        return "2d"
+    if any(marker in lower_query for marker in ("recent", "latest", "newest")):
+        return "24h"
+    return None
+
+
+def _detect_generation_intent(nl_query: str) -> Dict[str, Any]:
+    """Infer lightweight generation intent from an NL query."""
+    lower_query = nl_query.lower()
+    tokens = _tokenize_generation_text(nl_query)
+    keywords = re.findall(r"""['"]([^'"]+)['"]""", nl_query)
+    needs_trend = any(
+        marker in lower_query for marker in ("trend", "over time", "timeline", "hourly", "daily")
+    )
+    needs_count = any(
+        marker in lower_query for marker in ("count", "how many", "total", "number of")
+    )
+    needs_top = bool(re.search(r'\btop\s+\d+\b', lower_query)) or "most" in lower_query
+    needs_latest = any(marker in lower_query for marker in ("latest", "recent", "newest", "last records"))
+    wants_distinct = any(marker in lower_query for marker in ("distinct", "unique"))
+    needs_join = any(
+        marker in lower_query for marker in ("join", "correlate", "combine", "enrich", "across")
+    )
+
+    return {
+        "tokens": tokens,
+        "keywords": keywords[:2],
+        "limit": _extract_requested_limit(nl_query, default=10),
+        "time_window": _extract_time_window(nl_query),
+        "needs_trend": needs_trend,
+        "needs_count": needs_count,
+        "needs_top": needs_top,
+        "needs_latest": needs_latest or not (needs_trend or needs_count or needs_top),
+        "wants_distinct": wants_distinct,
+        "needs_join": needs_join,
+    }
+
+
+def _pick_generation_columns(table_info: Dict[str, Any], intent: Dict[str, Any]) -> Dict[str, Any]:
+    """Choose the best columns for the requested NL intent."""
+    fingerprinted = table_info.get("fingerprinted_columns", [])
+    if not fingerprinted:
+        fingerprinted = [
+            {"name": name, "data_type": "string", "score": 0.0}
+            for name in list((table_info.get("columns") or {}).keys())[:8]
+        ]
+
+    time_column = next(
+        (
+            column["name"]
+            for column in fingerprinted
+            if column.get("data_type") == "datetime"
+            or any(token in column["name"].lower() for token in ("time", "date", "timestamp"))
+        ),
+        None,
+    )
+    group_column = next(
+        (
+            column["name"]
+            for column in fingerprinted
+            if column["name"] != time_column and column.get("data_type") in {"string", "guid"}
+        ),
+        None,
+    )
+    filter_column = next(
+        (
+            column["name"]
+            for column in fingerprinted
+            if column["name"] not in {time_column, group_column}
+            and column.get("data_type") in {"string", "guid"}
+        ),
+        group_column,
+    )
+
+    output_columns = []
+    if time_column:
+        output_columns.append(time_column)
+    for column in fingerprinted:
+        if column["name"] not in output_columns:
+            output_columns.append(column["name"])
+        if len(output_columns) >= min(max(intent["limit"], 6), 8):
+            break
+
+    return {
+        "time_column": time_column,
+        "group_column": group_column,
+        "filter_column": filter_column,
+        "output_columns": output_columns[:8],
+    }
+
+
+def _build_time_filter(intent: Dict[str, Any], time_column: Optional[str]) -> str:
+    """Build a time filter clause when the query implies recency."""
+    if not time_column or not intent.get("time_window"):
+        return ""
+    return f" | where {bracket_if_needed(time_column)} > ago({intent['time_window']})"
+
+
+def _trend_bucket(time_window: Optional[str]) -> str:
+    """Choose a sensible bin size for trend queries."""
+    if not time_window:
+        return "1h"
+    if time_window.endswith("m"):
+        return "5m"
+    if time_window.endswith("h"):
+        hours = int(time_window[:-1])
+        return "15m" if hours <= 6 else "1h"
+    days = int(time_window[:-1]) if time_window.endswith("d") else 1
+    return "1h" if days <= 2 else "1d"
+
+
+def _build_candidate_queries(
+    table_info: Dict[str, Any],
+    intent: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Build deterministic candidate KQL queries for reranking."""
+    table_name = bracket_if_needed(table_info["table"])
+    column_plan = _pick_generation_columns(table_info, intent)
+    time_column = column_plan["time_column"]
+    group_column = column_plan["group_column"]
+    filter_column = column_plan["filter_column"]
+    output_columns = column_plan["output_columns"] or [column["name"] for column in table_info.get("fingerprinted_columns", [])[:6]]
+    project_clause = ", ".join(bracket_if_needed(column) for column in output_columns)
+    time_filter = _build_time_filter(intent, time_column)
+    filter_keyword = intent["keywords"][0].replace("'", "''") if intent["keywords"] else None
+    keyword_filter = ""
+    if filter_keyword and filter_column:
+        keyword_filter = f" | where {bracket_if_needed(filter_column)} has '{filter_keyword}'"
+
+    candidates: List[Dict[str, Any]] = []
+
+    if intent["needs_trend"] and time_column:
+        bucket = _trend_bucket(intent["time_window"])
+        candidates.append({
+            "template": "trend",
+            "query": (
+                f"{table_name}{time_filter}{keyword_filter}"
+                f" | summarize count() by bin({bracket_if_needed(time_column)}, {bucket})"
+                f" | order by {bracket_if_needed(time_column)} asc"
+            ),
+            "columns_used": [column for column in [time_column, filter_column] if column],
+        })
+
+    if (intent["needs_count"] or intent["needs_top"] or intent["wants_distinct"]) and group_column:
+        if intent["wants_distinct"]:
+            candidate_query = (
+                f"{table_name}{time_filter}{keyword_filter}"
+                f" | distinct {bracket_if_needed(group_column)}"
+                f" | take {intent['limit']}"
+            )
+            template = "distinct"
+        else:
+            candidate_query = (
+                f"{table_name}{time_filter}{keyword_filter}"
+                f" | summarize count_ = count() by {bracket_if_needed(group_column)}"
+                f" | top {intent['limit']} by count_ desc"
+            )
+            template = "aggregate"
+
+        candidates.append({
+            "template": template,
+            "query": candidate_query,
+            "columns_used": [column for column in [time_column, group_column, filter_column] if column],
+        })
+
+    if intent["needs_latest"] and time_column:
+        candidates.append({
+            "template": "latest",
+            "query": (
+                f"{table_name}{time_filter}{keyword_filter}"
+                f" | top {intent['limit']} by {bracket_if_needed(time_column)} desc"
+                f" | project {project_clause}"
+            ),
+            "columns_used": [column for column in [time_column, filter_column] if column] + output_columns,
+        })
+
+    candidates.append({
+        "template": "projection",
+        "query": f"{table_name}{time_filter}{keyword_filter} | project {project_clause} | take {intent['limit']}",
+        "columns_used": [column for column in [time_column, filter_column] if column] + output_columns,
+    })
+
+    deduped_candidates = []
+    seen_queries = set()
+    for candidate in candidates:
+        if candidate["query"] not in seen_queries:
+            seen_queries.add(candidate["query"])
+            deduped_candidates.append(candidate)
+    return deduped_candidates
+
+
+def _build_join_candidate(
+    candidate_tables: List[Dict[str, Any]],
+    join_hints: List[str],
+    intent: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Build a simple join candidate from stored join hints."""
+    if len(candidate_tables) < 2 or not join_hints or not intent.get("needs_join"):
+        return None
+
+    for join_hint in join_hints:
+        match = re.match(r"(.+?) joins with (.+?) on (.+)", join_hint)
+        if not match:
+            continue
+
+        left_table, right_table, join_column = match.groups()
+        left_info = next((table for table in candidate_tables if table["table"] == left_table), None)
+        right_info = next((table for table in candidate_tables if table["table"] == right_table), None)
+        if not left_info or not right_info:
+            continue
+
+        left_columns = _pick_generation_columns(left_info, intent)
+        right_columns = _pick_generation_columns(right_info, intent)
+        left_time_filter = _build_time_filter(intent, left_columns["time_column"])
+        projected_columns = []
+        for column in left_columns["output_columns"][:4] + right_columns["output_columns"][:4]:
+            if column != join_column and column not in projected_columns:
+                projected_columns.append(column)
+        project_clause = ", ".join(bracket_if_needed(column) for column in projected_columns[:8])
+
+        return {
+            "template": "join",
+            "table": left_table,
+            "query": (
+                f"{bracket_if_needed(left_table)}{left_time_filter}"
+                f" | join kind=inner {bracket_if_needed(right_table)} on {bracket_if_needed(join_column)}"
+                f" | project {project_clause}"
+                f" | take {intent['limit']}"
+            ),
+            "columns_used": [join_column] + projected_columns[:8],
+        }
+
+    return None
+
+
+def _score_generation_candidate(
+    candidate: Dict[str, Any],
+    table_info: Dict[str, Any],
+    intent: Dict[str, Any],
+) -> float:
+    """Score candidate queries before validation."""
+    score = float(table_info.get("score", 0.0)) * 2.0
+    template = candidate["template"]
+    query = candidate["query"].lower()
+
+    if intent["needs_trend"] and template == "trend":
+        score += 4.0
+    if intent["needs_count"] and template == "aggregate":
+        score += 3.5
+    if intent["needs_join"] and template == "join":
+        score += 4.0
+    if intent["needs_top"] and ("top " in query or template == "aggregate"):
+        score += 2.5
+    if intent["needs_latest"] and template == "latest":
+        score += 3.0
+    if intent["wants_distinct"] and template == "distinct":
+        score += 3.0
+    if intent["time_window"] and "| where " in query:
+        score += 1.25
+    score += min(len(candidate.get("columns_used", [])), 8) * 0.1
+    score -= max(len(query) - 240, 0) * 0.002
+    return round(score, 4)
+
+
+async def _validate_candidate_query(
+    candidate: Dict[str, Any],
+    cluster_url: str,
+    database: str,
+) -> Dict[str, Any]:
+    """Validate a generated candidate against cached schema."""
+    validation = await kql_validator.validate_query(
+        query=candidate["query"],
+        cluster=cluster_url,
+        database=database,
+        auto_discover=False,
+    )
+    validated_candidate = {**candidate, "validation": validation}
+    if validation.get("valid"):
+        validated_candidate["score"] = round(candidate["score"] + 5.0, 4)
+    else:
+        validated_candidate["score"] = round(candidate["score"] - len(validation.get("errors", [])) * 2.0, 4)
+    return validated_candidate
+
+
+def _build_safe_repair_query(
+    table_info: Dict[str, Any],
+    intent: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Fallback repair candidate that uses only the top ranked schema columns."""
+    column_plan = _pick_generation_columns(table_info, intent)
+    time_filter = _build_time_filter(intent, column_plan["time_column"])
+    project_clause = ", ".join(
+        bracket_if_needed(column) for column in column_plan["output_columns"][:6]
+    )
+    return {
+        "template": "repair_projection",
+        "query": (
+            f"{bracket_if_needed(table_info['table'])}{time_filter}"
+            f" | project {project_clause}"
+            f" | take {intent['limit']}"
+        ),
+        "columns_used": column_plan["output_columns"][:6],
+        "score": float(table_info.get("score", 0.0)),
+    }
 
 
 @mcp.tool()
@@ -89,6 +582,7 @@ async def execute_kql_query(
         JSON string with query results or generated query.
     """
     try:
+        repaired_query_info = None
         if not kusto_manager_global or not kusto_manager_global.get("authenticated"):
             return json.dumps({
                 "success": False,
@@ -115,14 +609,20 @@ async def execute_kql_query(
             if not generated_result["success"]:
                 return ErrorHandler.safe_json_dumps(generated_result, indent=2)
 
-            query = generated_result["query"]
+            query = generated_result.get("query_plain", generated_result["query"])
             if output_format == "generation_only":
                 return ErrorHandler.safe_json_dumps(generated_result, indent=2)
 
         # Check cache for non-generate queries (fast path)
         if not generate_query and output_format == "json":
             try:
-                cached = memory_manager.get_cached_result(query, ttl_seconds=120)
+                cached = memory_manager.get_cached_result(
+                    query,
+                    ttl_seconds=120,
+                    cluster=cluster_url,
+                    database=database,
+                    cache_namespace=f"execute:{output_format}",
+                )
                 if cached:
                     logger.info("Returning cached result for query")
                     return cached
@@ -137,17 +637,52 @@ async def execute_kql_query(
 
         if not validation_result["valid"]:
             logger.warning("Validation failed: %s", validation_result['errors'])
-            result = {
-                "success": False,
-                "error": "Query validation failed",
-                "validation_errors": validation_result["errors"],
-                "warnings": validation_result.get("warnings", []),
-                "suggestions": validation_result.get("suggestions", []),
-                "query": query[:200] + "..." if len(query) > 200 else query,
-                "requested_auth_method": requested_auth_method,
-                "active_auth_method": active_auth_method
-            }
-            return json.dumps(result, indent=2)
+            repaired_query_info = await _repair_query_with_schema_context(
+                query,
+                cluster_url,
+                database,
+                validation_result,
+            )
+            if repaired_query_info:
+                query = repaired_query_info["query"]
+                validation_result = await kql_validator.validate_query(
+                    query=query,
+                    cluster=cluster_url,
+                    database=database,
+                    auto_discover=False,
+                )
+                logger.info(
+                    "Schema-grounded repair succeeded for %s using replacements: %s",
+                    repaired_query_info["table_name"],
+                    repaired_query_info["replacements"],
+                )
+
+                if output_format == "generation_only":
+                    return ErrorHandler.safe_json_dumps({
+                        "success": True,
+                        "query": query,
+                        "query_plain": query,
+                        "repair_applied": True,
+                        "replacements": repaired_query_info["replacements"],
+                        "table_name": repaired_query_info["table_name"],
+                        "preferred_time_column": repaired_query_info["preferred_time_column"],
+                        "schema_columns": repaired_query_info["schema_columns"],
+                    }, indent=2)
+
+            if not validation_result["valid"]:
+                result = {
+                    "success": False,
+                    "error": "Query validation failed",
+                    "validation_errors": validation_result["errors"],
+                    "warnings": validation_result.get("warnings", []),
+                    "suggestions": validation_result.get("suggestions", []),
+                    "query": query[:200] + "..." if len(query) > 200 else query,
+                    "requested_auth_method": requested_auth_method,
+                    "active_auth_method": active_auth_method
+                }
+                return json.dumps(result, indent=2)
+
+        repair_metadata = None if generate_query else repaired_query_info
 
         logger.info("Query validated successfully. Tables: %s, Columns: %s", validation_result['tables_used'], validation_result['columns_validated'])
 
@@ -271,11 +806,23 @@ async def execute_kql_query(
                 "requested_auth_method": requested_auth_method,
                 "active_auth_method": active_auth_method
             }
+            if repair_metadata:
+                result["repair_applied"] = True
+                result["replacements"] = repair_metadata["replacements"]
+                result["schema_grounded_table"] = repair_metadata["table_name"]
+                result["preferred_time_column"] = repair_metadata["preferred_time_column"]
 
             # Cache successful result for future queries
             result_json = ErrorHandler.safe_json_dumps(result, indent=2)
             try:
-                memory_manager.cache_query_result(query, result_json, len(df))
+                memory_manager.cache_query_result(
+                    query,
+                    result_json,
+                    len(df),
+                    cluster=cluster_url,
+                    database=database,
+                    cache_namespace=f"execute:{output_format}",
+                )
             except Exception:
                 pass  # Don't fail on cache errors
 
@@ -323,136 +870,190 @@ async def _generate_kql_from_natural_language(
     - <CLUSTER>, <DATABASE>, <TABLE>, <COLUMN> tags for semantic clarity
     - <KQL> tags wrap the generated query for easy extraction
     """
-    from .constants import KQL_RESERVED_WORDS, SPECIAL_TOKENS
+    from .constants import SPECIAL_TOKENS
     
     try:
-        # 1. First, try to find relevant tables from schema memory using semantic search
-        relevant_tables = memory_manager.find_relevant_tables(cluster_url, database, natural_language_query, limit=5)
+        intent = _detect_generation_intent(natural_language_query)
+        cag_bundle = memory_manager.build_cag_bundle(
+            cluster_url,
+            database,
+            natural_language_query,
+            max_tables=3,
+            max_columns=12,
+        )
+        candidate_tables = list(cag_bundle.get("tables", []))
 
-        # 2. Determine target table from: explicit param > semantic search > NL extraction
-        target_table = None
         if table_name:
-            target_table = table_name
-        elif relevant_tables:
-            # Use the most relevant table from schema memory
-            target_table = relevant_tables[0]["table"]
-            logger.info("Selected table '%s' from schema memory (score: %.2f)",
-                       target_table, relevant_tables[0].get("score", 0))
-        else:
-            # Fallback: extract potential table name from NL query
-            potential_tables = re.findall(r'\b([A-Z][A-Za-z0-9_]*)\b', natural_language_query)
-            if potential_tables:
-                target_table = potential_tables[0]
+            schema_info = await schema_manager.get_table_schema(cluster_url, database, table_name)
+            if not schema_info or not schema_info.get("columns"):
+                return {
+                    "success": False,
+                    "error": f"No schema found for {SPECIAL_TOKENS['TABLE_START']}{table_name}{SPECIAL_TOKENS['TABLE_END']} in memory.",
+                    "query": "",
+                    "suggestion": f"Run: schema_memory(operation='discover', cluster_url='{cluster_url}', database='{database}', table_name='{table_name}')",
+                }
 
-        if not target_table:
+            explicit_table = {
+                "table": table_name,
+                "columns": schema_info["columns"],
+                "score": 100.0,
+                "matched_columns": [],
+                "datetime_columns": sum(
+                    1
+                    for column_def in schema_info["columns"].values()
+                    if isinstance(column_def, dict) and column_def.get("data_type") == "datetime"
+                ),
+            }
+            explicit_table["fingerprinted_columns"] = memory_manager.fingerprint_columns(
+                natural_language_query,
+                {"table": table_name, "columns": schema_info["columns"]},
+                similar_queries=cag_bundle.get("similar_queries", []),
+                max_columns=12,
+            )
+            explicit_table["selected_columns"] = {
+                column["name"]: schema_info["columns"][column["name"]]
+                for column in explicit_table["fingerprinted_columns"]
+                if column["name"] in schema_info["columns"]
+            }
+            candidate_tables = [explicit_table] + [
+                table for table in candidate_tables if table["table"].lower() != table_name.lower()
+            ]
+
+        if not candidate_tables:
             return {
                 "success": False,
-                "error": f"{SPECIAL_TOKENS['CLUSTER_START']}ERROR{SPECIAL_TOKENS['CLUSTER_END']} Could not determine target table.",
+                "error": f"{SPECIAL_TOKENS['CLUSTER_START']}ERROR{SPECIAL_TOKENS['CLUSTER_END']} Could not determine a relevant table from schema memory.",
                 "query": "",
-                "suggestion": "Use schema_memory tool to discover available tables before generating queries."
+                "suggestion": "Use schema_memory(operation='list_tables') or pass table_name explicitly before generating queries.",
             }
 
-        # 3. Get schema for the target table from schema memory (NOT hardcoded)
-        schema_info = await schema_manager.get_table_schema(cluster_url, database, target_table)
-        if not schema_info or not schema_info.get("columns"):
+        validated_candidates = []
+        join_candidate = _build_join_candidate(
+            candidate_tables[:2],
+            cag_bundle.get("join_hints", []),
+            intent,
+        )
+        if join_candidate:
+            join_candidate["score"] = _score_generation_candidate(
+                join_candidate,
+                candidate_tables[0],
+                intent,
+            )
+            validated_candidates.append(
+                await _validate_candidate_query(join_candidate, cluster_url, database)
+            )
+
+        for table_info in candidate_tables[:2]:
+            for candidate in _build_candidate_queries(table_info, intent):
+                candidate["table"] = table_info["table"]
+                candidate["score"] = _score_generation_candidate(candidate, table_info, intent)
+                validated_candidates.append(
+                    await _validate_candidate_query(candidate, cluster_url, database)
+                )
+
+        validated_candidates.sort(key=lambda item: item["score"], reverse=True)
+        best_candidate = next(
+            (candidate for candidate in validated_candidates if candidate["validation"].get("valid")),
+            validated_candidates[0] if validated_candidates else None,
+        )
+
+        if not best_candidate:
             return {
                 "success": False,
-                "error": f"No schema found for {SPECIAL_TOKENS['TABLE_START']}{target_table}{SPECIAL_TOKENS['TABLE_END']} in memory.",
+                "error": "No viable KQL candidate could be generated from the available schema context.",
                 "query": "",
-                "suggestion": f"Run: schema_memory(operation='discover', cluster_url='{cluster_url}', database='{database}', table_name='{target_table}')"
+                "suggestion": "Discover schema for the target table first, then retry with a narrower natural language request.",
             }
 
-        # 4. Build column mapping ONLY from schema memory (case-insensitive)
-        schema_columns = schema_info["columns"]
-        col_map = {c.lower(): c for c in schema_columns.keys()}
-        all_schema_columns = list(schema_columns.keys())  # Preserve order
-        
-        # Build set of reserved words for filtering (case-insensitive)
-        reserved_words_lower = {w.lower() for w in KQL_RESERVED_WORDS}
+        if not best_candidate["validation"].get("valid"):
+            repair_candidate = _build_safe_repair_query(candidate_tables[0], intent)
+            repair_candidate["table"] = candidate_tables[0]["table"]
+            repair_candidate = await _validate_candidate_query(repair_candidate, cluster_url, database)
+            if repair_candidate["validation"].get("valid"):
+                best_candidate = repair_candidate
 
-        # 5. Get CAG context (includes schema + similar queries + join hints from memory)
-        cag_context = memory_manager.get_relevant_context(cluster_url, database, natural_language_query)
-
-        # 6. Find similar successful queries from memory for pattern matching
-        similar_queries = memory_manager.find_similar_queries(cluster_url, database, natural_language_query, limit=3)
-
-        # 7. Extract ONLY columns that exist in schema memory
-        # First, extract all words from NL query that might be columns
-        nl_words = set(re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', natural_language_query.lower()))
-        
-        # Filter out KQL reserved words before matching
-        nl_words = {w for w in nl_words if w not in reserved_words_lower}
-
-        # Also extract from similar queries (these are validated queries from memory)
-        for sq in similar_queries:
-            if sq.get('score', 0) > 0.5:  # Only use high-confidence matches
-                sq_words = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', sq.get('query', '').lower())
-                # Filter reserved words from similar queries too
-                sq_words = [w for w in sq_words if w not in reserved_words_lower]
-                nl_words.update(sq_words)
-
-        # 8. Match ONLY against schema columns (strict validation)
-        valid_columns = []
-        for word in nl_words:
-            if word in col_map:
-                actual_col = col_map[word]
-                # Double-check the column exists in schema (defensive)
-                if actual_col in schema_columns:
-                    valid_columns.append(actual_col)
-
-        # Remove duplicates while preserving order
-        valid_columns = list(dict.fromkeys(valid_columns))
-
-        # 9. Build query using ONLY validated schema data
-        if valid_columns:
-            # Limit to reasonable number of columns
-            project_cols = valid_columns[:12]
-            project_clause = ", ".join(bracket_if_needed(c) for c in project_cols)
-            final_query = f"{bracket_if_needed(target_table)} | project {project_clause} | take 10"
-            method = "schema_memory_validated"
-            columns_used = project_cols
-        else:
-            # Safe fallback: project first N columns from schema (NOT all columns)
-            # This ensures we always use schema-validated columns
-            default_cols = all_schema_columns[:10]  # First 10 schema columns
-            project_clause = ", ".join(bracket_if_needed(c) for c in default_cols)
-            final_query = f"{bracket_if_needed(target_table)} | project {project_clause} | take 10"
-            method = "schema_memory_fallback"
-            columns_used = default_cols
-            logger.info("No specific columns matched from NL query for '%s', using schema columns: %s", 
-                       target_table, default_cols)
-
-        # 10. Build structured response with special tokens for LLM parsing
-        # Format columns with special tokens for better semantic understanding
+        selected_table = next(
+            (table for table in candidate_tables if table["table"] == best_candidate["table"]),
+            candidate_tables[0],
+        )
+        valid_candidate_count = sum(
+            1 for candidate in validated_candidates if candidate["validation"].get("valid")
+        )
+        generation_metrics = {
+            "candidate_count": len(validated_candidates),
+            "valid_candidate_count": valid_candidate_count,
+            "repair_used": best_candidate["template"] == "repair_projection",
+            "table_candidate_count": len(candidate_tables[:2]),
+        }
+        selected_columns = _pick_generation_columns(selected_table, intent)["output_columns"]
+        schema_columns = selected_table.get("columns", {})
         columns_with_tokens = [
-            f"{SPECIAL_TOKENS['COLUMN']}:{col}|{SPECIAL_TOKENS['TYPE']}:{schema_columns.get(col, {}).get('data_type', 'unknown')}"
-            for col in columns_used
+            f"{SPECIAL_TOKENS['COLUMN']}:{column}|{SPECIAL_TOKENS['TYPE']}:{schema_columns.get(column, {}).get('data_type', 'unknown') if isinstance(schema_columns.get(column), dict) else schema_columns.get(column, 'unknown')}"
+            for column in selected_columns
         ]
-        
-        # Build schema context with tokens
         schema_context = (
             f"{SPECIAL_TOKENS['CLUSTER_START']}{cluster_url}{SPECIAL_TOKENS['CLUSTER_END']}"
             f"{SPECIAL_TOKENS['SEPARATOR']}"
             f"{SPECIAL_TOKENS['DATABASE_START']}{database}{SPECIAL_TOKENS['DATABASE_END']}"
             f"{SPECIAL_TOKENS['SEPARATOR']}"
-            f"{SPECIAL_TOKENS['TABLE_START']}{target_table}{SPECIAL_TOKENS['TABLE_END']}"
+            f"{SPECIAL_TOKENS['TABLE_START']}{selected_table['table']}{SPECIAL_TOKENS['TABLE_END']}"
         )
+
+        try:
+            memory_manager.store_learning_result(
+                natural_language_query,
+                {
+                    "target_table": selected_table["table"],
+                    "query": best_candidate["query"],
+                    "generation_metrics": generation_metrics,
+                    "ranked_tables": [table["table"] for table in candidate_tables[:3]],
+                },
+                execution_type="generation",
+            )
+        except Exception as learning_error:  # pylint: disable=broad-exception-caught
+            logger.debug("Failed to store generation telemetry: %s", learning_error)
 
         return {
             "success": True,
-            "query": f"{SPECIAL_TOKENS['QUERY_START']}{final_query}{SPECIAL_TOKENS['QUERY_END']}",
-            "query_plain": final_query,  # Plain query without tokens for direct execution
-            "generation_method": method,
-            "target_table": target_table,
-            "schema_validated": True,
-            "columns_used": columns_used,
+            "query": best_candidate["query"],
+            "query_plain": best_candidate["query"],
+            "query_tagged": f"{SPECIAL_TOKENS['QUERY_START']}{best_candidate['query']}{SPECIAL_TOKENS['QUERY_END']}",
+            "generation_method": "cag_hybrid_ranking",
+            "target_table": selected_table["table"],
+            "schema_validated": best_candidate["validation"].get("valid", False),
+            "validation_errors": best_candidate["validation"].get("errors", []),
+            "columns_used": selected_columns,
             "columns_with_types": columns_with_tokens,
-            "total_schema_columns": len(all_schema_columns),
-            "available_columns": all_schema_columns[:20],
-            "similar_queries_found": len(similar_queries),
-            "cag_context_used": bool(cag_context),
+            "ranked_tables": [
+                {
+                    "table": table["table"],
+                    "score": table.get("score", 0.0),
+                    "matched_columns": table.get("matched_columns", []),
+                    "top_columns": [column["name"] for column in table.get("fingerprinted_columns", [])[:6]],
+                }
+                for table in candidate_tables[:3]
+            ],
+            "candidate_queries": [
+                {
+                    "table": candidate["table"],
+                    "template": candidate["template"],
+                    "score": candidate["score"],
+                    "valid": candidate["validation"].get("valid", False),
+                    "query": candidate["query"],
+                }
+                for candidate in validated_candidates[:4]
+            ],
+            "generation_metrics": generation_metrics,
+            "similar_queries_found": len(cag_bundle.get("similar_queries", [])),
+            "cag_context_used": bool(cag_bundle.get("context")),
+            "cag_context": cag_bundle.get("context", ""),
             "schema_context": schema_context,
-            "note": f"{SPECIAL_TOKENS['AI_START']}Query generated using ONLY schema-validated columns. All projected columns exist in table schema.{SPECIAL_TOKENS['AI_END']}"
+            "note": (
+                f"{SPECIAL_TOKENS['AI_START']}"
+                "Query generated from compact CAG retrieval, hybrid table/column ranking, "
+                "candidate reranking, and schema validation."
+                f"{SPECIAL_TOKENS['AI_END']}"
+            ),
         }
 
     except (ValueError, KeyError, RuntimeError) as e:
@@ -491,6 +1092,9 @@ async def schema_memory(
     - "get_stats": Get memory and cache statistics
     - "clear_cache": Clear all cached schemas
     - "generate_report": Generate analysis report with visualizations
+    - "cache_stats": Get detailed query cache statistics (NEW)
+    - "cleanup_cache": Remove expired cache entries (NEW)
+    - "list_multi_cluster_tables": List tables found in multiple clusters (NEW)
 
     Args:
         operation: The operation to perform (see list above)
@@ -537,7 +1141,7 @@ async def schema_memory(
                     "success": False,
                     "error": "cluster_url, database, and natural_language_query are required for get_context operation"
                 })
-            return await _schema_get_context_operation(cluster_url, database, natural_language_query)
+            return await _schema_get_context_operation(cluster_url, database, natural_language_query, table_name)
         elif operation == "generate_report":
             return await _schema_generate_report_operation(session_id, include_visualizations)
         elif operation == "clear_cache":
@@ -551,11 +1155,21 @@ async def schema_memory(
                     "error": "cluster_url and database are required for refresh_schema operation"
                 })
             return await _schema_refresh_operation(cluster_url, database)
+        elif operation == "cache_stats":
+            return await _schema_cache_stats_operation()
+        elif operation == "cleanup_cache":
+            return await _schema_cleanup_cache_operation()
+        elif operation == "list_multi_cluster_tables":
+            return await _schema_list_multi_cluster_tables_operation()
         else:
             return json.dumps({
                 "success": False,
                 "error": f"Unknown operation: {operation}",
-                "available_operations": ["discover", "list_tables", "get_context", "generate_report", "clear_cache", "get_stats", "refresh_schema"]
+                "available_operations": [
+                    "discover", "list_tables", "get_context", "generate_report", 
+                    "clear_cache", "get_stats", "refresh_schema",
+                    "cache_stats", "cleanup_cache", "list_multi_cluster_tables"
+                ]
             })
 
     except (ValueError, KeyError, RuntimeError) as e:
@@ -849,7 +1463,12 @@ async def _schema_list_tables_operation(cluster_url: str, database: str) -> str:
             "error": str(e)
         })
 
-async def _schema_get_context_operation(cluster_url: str, database: str, natural_language_query: str) -> str:
+async def _schema_get_context_operation(
+    cluster_url: str,
+    database: str,
+    natural_language_query: str,
+    table_name: Optional[str] = None,
+) -> str:
     """Get AI context for tables based on natural language query parsing."""
     try:
         if not natural_language_query:
@@ -857,23 +1476,69 @@ async def _schema_get_context_operation(cluster_url: str, database: str, natural
                 "success": False,
                 "error": "natural_language_query is required for get_context operation"
             })
+        if table_name:
+            schema_info = await schema_manager.get_table_schema(cluster_url, database, table_name)
+            if not schema_info or not schema_info.get("columns"):
+                return json.dumps({
+                    "success": False,
+                    "error": f"No schema found for table '{table_name}'"
+                })
 
-        # Simple table extraction instead of undefined query_processor
-        # Note: 're' is already imported at module level
-        # Look for words starting with capital letters that might be tables, or just use the whole query as context
-        # For now, let's try to extract potential table names using a simple regex
-        potential_tables = re.findall(r'\b[A-Z][a-zA-Z0-9_]*\b', natural_language_query)
-        tables = list(set(potential_tables))
-
-        if not tables:
-            # If no specific tables found, we might still want context for the whole database
-            # But the original code required tables. Let's fallback to a generic context request.
-            pass
-
-        context = memory_manager.get_ai_context_for_tables(cluster_url, database, tables)
+            similar_queries = memory_manager.find_similar_queries(
+                cluster_url, database, natural_language_query, limit=3
+            )
+            fingerprinted_columns = memory_manager.fingerprint_columns(
+                natural_language_query,
+                {"table": table_name, "columns": schema_info["columns"]},
+                similar_queries=similar_queries,
+                max_columns=12,
+            )
+            selected_columns = {
+                column["name"]: schema_info["columns"][column["name"]]
+                for column in fingerprinted_columns
+                if column["name"] in schema_info["columns"]
+            }
+            join_hints = memory_manager.get_join_hints([table_name])
+            cag_bundle = {
+                "tables": [{
+                    "table": table_name,
+                    "score": 100.0,
+                    "columns": schema_info["columns"],
+                    "fingerprinted_columns": fingerprinted_columns,
+                    "selected_columns": selected_columns,
+                }],
+                "similar_queries": similar_queries,
+                "join_hints": join_hints,
+                "context": memory_manager._to_toon(  # pylint: disable=protected-access
+                    [{"table": table_name, "columns": selected_columns}],
+                    similar_queries,
+                    join_hints,
+                ),
+            }
+        else:
+            cag_bundle = memory_manager.build_cag_bundle(
+                cluster_url,
+                database,
+                natural_language_query,
+                max_tables=3,
+                max_columns=12,
+            )
+        tables = [table["table"] for table in cag_bundle.get("tables", [])]
+        context = cag_bundle.get("context", "")
         return json.dumps({
             "success": True,
             "tables": tables,
+            "ranked_tables": cag_bundle.get("tables", []),
+            "similar_queries": cag_bundle.get("similar_queries", []),
+            "join_hints": cag_bundle.get("join_hints", []),
+            "strict_schema": {
+                table["table"]: {
+                    "allowed_columns": list((table.get("columns") or {}).keys())[:50],
+                    "recommended_columns": [column["name"] for column in table.get("fingerprinted_columns", [])[:12]],
+                    "preferred_time_column": _choose_preferred_time_column(table.get("columns") or {}),
+                }
+                for table in cag_bundle.get("tables", [])
+            },
             "context": context
         }, indent=2)
     except (ValueError, RuntimeError, AttributeError) as e:
@@ -921,15 +1586,14 @@ async def _schema_generate_report_operation(session_id: str, include_visualizati
 async def _schema_clear_cache_operation() -> str:
     """Clear schema cache (LRU for get_schema)."""
     try:
-        # Clear the LRU cache on get_schema if it exists
-        # MemoryManager uses SQLite, so we might not have an LRU cache on the method itself anymore.
-        # If we want to clear internal caches, we should add a method to MemoryManager.
-        # For now, we'll just log that we are clearing.
-        logger.info("Schema cache clear requested")
+        schema_manager.clear_schema_cache()
+        removed_query_cache = memory_manager.clear_query_cache()
+        logger.info("Schema and query cache clear requested")
 
         return json.dumps({
             "success": True,
-            "message": "Schema cache cleared successfully"
+            "message": "Schema and query cache cleared successfully",
+            "query_cache_entries_removed": removed_query_cache,
         })
     except (ValueError, RuntimeError, AttributeError) as e:
         return json.dumps({
@@ -1036,6 +1700,76 @@ async def _schema_refresh_operation(cluster_url: str, database: str) -> str:
         return json.dumps({
             "success": False,
             "error": f"Schema refresh failed: {str(e)}"
+        })
+
+
+async def _schema_cache_stats_operation() -> str:
+    """Get detailed query cache statistics."""
+    try:
+        cache_stats = memory_manager.get_cache_stats()
+        return json.dumps({
+            "success": True,
+            "cache_stats": cache_stats,
+            "description": {
+                "total_cached": "Total number of cached query results",
+                "expired_entries": "Number of expired cache entries awaiting cleanup",
+                "by_query_type": "Breakdown by query type (schema, aggregation, realtime, etc.)",
+                "ttl_settings": {
+                    "schema": "3600s (1 hour) - Schema queries",
+                    "aggregation": "600s (10 minutes) - Aggregation queries",
+                    "realtime": "60s (1 minute) - Real-time queries",
+                    "default": "300s (5 minutes) - Other queries"
+                }
+            }
+        }, indent=2)
+    except (ValueError, RuntimeError, AttributeError) as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        })
+
+
+async def _schema_cleanup_cache_operation() -> str:
+    """Remove expired cache entries."""
+    try:
+        removed_count = memory_manager.cleanup_expired_cache()
+        return json.dumps({
+            "success": True,
+            "message": "Cache cleanup completed",
+            "entries_removed": removed_count,
+            "timestamp": datetime.now().isoformat()
+        }, indent=2)
+    except (ValueError, RuntimeError, AttributeError) as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        })
+
+
+async def _schema_list_multi_cluster_tables_operation() -> str:
+    """List all tables with their known cluster/database locations."""
+    try:
+        all_locations = memory_manager.get_all_table_locations()
+        
+        # Identify tables in multiple clusters
+        multi_cluster_tables = {
+            table: locations 
+            for table, locations in all_locations.items() 
+            if len(set(loc["cluster"] for loc in locations)) > 1
+        }
+        
+        return json.dumps({
+            "success": True,
+            "total_tables_tracked": len(all_locations),
+            "multi_cluster_tables_count": len(multi_cluster_tables),
+            "multi_cluster_tables": multi_cluster_tables,
+            "all_table_locations": all_locations,
+            "note": "Tables in multiple clusters may have different schemas or data"
+        }, indent=2)
+    except (ValueError, RuntimeError, AttributeError) as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
         })
 
 

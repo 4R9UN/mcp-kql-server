@@ -1,6 +1,6 @@
 # MCP KQL Server Architecture
 
-**Version**: 2.2.0
+**Version**: 2.1.1
 **Author**: Arjun Trivedi
 **Email**: arjuntrivedi42@yahoo.com
 **Last Updated**: December 2025
@@ -15,8 +15,9 @@
 4. [Data Flow Diagrams](#4-data-flow-diagrams)
 5. [Performance Architecture](#5-performance-architecture)
 6. [Memory & Caching Strategy](#6-memory--caching-strategy)
-7. [Security Model](#7-security-model)
-8. [Module Reference](#8-module-reference)
+7. [Multi-Cluster Support](#7-multi-cluster-support)
+8. [Security Model](#8-security-model)
+9. [Module Reference](#9-module-reference)
 
 ---
 
@@ -30,8 +31,11 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
 |---------|-------------|
 | **Natural Language to KQL** | Convert natural language questions to KQL queries |
 | **Schema Memory** | Intelligent caching with SQLite backend |
-| **Connection Pooling** | Efficient client reuse and management |
+| **Connection Pooling** | Efficient client reuse with health checks |
 | **Batch Execution** | Execute multiple queries in parallel |
+| **Configurable TTL Cache** | Query-type-aware caching with automatic cleanup (NEW) |
+| **Multi-Cluster Support** | Track tables across multiple clusters (NEW) |
+| **Health Check Scheduling** | Background connection health monitoring (NEW) |
 | **Auto-Update** | Automatic version checking from PyPI |
 
 ### Design Principles
@@ -60,7 +64,7 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
                                      │
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        MCP KQL Server (v2.2.0)                               │
+│                        MCP KQL Server (v2.1.1)                               │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │                         API Layer (mcp_server.py)                       │ │
@@ -75,7 +79,7 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
 │  │                     Core Processing Layer                                ││
 │  │                                                                          ││
 │  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    ││
-│  │  │ QueryProcessor│ │ ErrorHandler │ │SchemaManager │ │ KQLValidator │    ││
+│  │  │Query Helpers │ │ ErrorHandler │ │SchemaManager │ │ KQLValidator │    ││
 │  │  │  (utils.py)  │ │  (utils.py)  │ │  (utils.py)  │ │(kql_validator)│    ││
 │  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘    ││
 │  │                                                                          ││
@@ -86,7 +90,7 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
 │  └──────────────────────────────────────────────────────────────────────────┘│
 │                                     │                                        │
 │  ┌──────────────────────────────────┼──────────────────────────────────────┐│
-│  │                     Performance Layer (NEW in v2.2.0)                    ││
+│  │                     Performance Layer (NEW in v2.1.1)                    ││
 │  │                                                                          ││
 │  │  ┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐ ││
 │  │  │KustoConnectionPool │  │BatchQueryExecutor  │  │  SchemaPreloader   │ ││
@@ -150,7 +154,7 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
 | `mcp_server.py` | MCP tool registration & routing | `execute_kql_query()`, `schema_memory()` |
 | `execute_kql.py` | KQL execution engine | `kql_execute_tool()`, `_get_kusto_client()` |
 | `memory.py` | Persistent schema storage | `MemoryManager`, `SemanticSearch` |
-| `utils.py` | Utilities & helpers | `QueryProcessor`, `ErrorHandler`, `SchemaManager` |
+| `utils.py` | Utilities & helpers | `normalize_cluster_uri()`, `bracket_if_needed()`, `ErrorHandler`, `SchemaManager` |
 | `kql_auth.py` | Azure authentication | `authenticate_kusto()` |
 | `kql_validator.py` | Query validation | `KQLValidator` |
 | `ai_prompts.py` | NL2KQL prompt templates | `build_nl2kql_prompt()` |
@@ -195,7 +199,7 @@ sequenceDiagram
     participant Server as mcp_server.py
     participant Pool as ConnectionPool
     participant Auth as kql_auth.py
-    participant Processor as QueryProcessor
+    participant Processor as Query Helpers
     participant Memory as MemoryManager
     participant Executor as execute_kql.py
     participant Azure as Azure Data Explorer
@@ -217,9 +221,9 @@ sequenceDiagram
     end
     
     Note over Server: Phase 2: Query Processing
-    Server->>Processor: process_query(query)
-    Processor->>Processor: Clean, validate, extract params
-    Processor->>Server: Return processed query
+    Server->>Processor: normalize identifiers and cluster URI
+    Processor->>Processor: Apply helper-based cleanup
+    Processor->>Server: Return normalized inputs
     
     Note over Server: Phase 3: Schema Context
     Server->>Memory: get_relevant_context(cluster, db, query)
@@ -422,9 +426,48 @@ CREATE TABLE embeddings (
     model_version TEXT,
     created_at TIMESTAMP
 );
+
+-- Query result cache (NEW in v2.1.1)
+CREATE TABLE query_cache (
+    id INTEGER PRIMARY KEY,
+    query_hash TEXT UNIQUE NOT NULL,
+    query_text TEXT NOT NULL,
+    result_json TEXT,
+    query_type TEXT DEFAULT 'default',   -- schema|aggregation|realtime|default
+    ttl_seconds INTEGER DEFAULT 300,
+    cluster TEXT,
+    database TEXT,
+    cached_at TIMESTAMP,
+    expires_at TIMESTAMP
+);
+
+-- Multi-cluster table locations (NEW in v2.1.1)
+CREATE TABLE table_locations (
+    id INTEGER PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    cluster TEXT NOT NULL,
+    database TEXT NOT NULL,
+    last_seen TIMESTAMP,
+    UNIQUE(table_name, cluster, database)
+);
 ```
 
-### 6.2 Caching Hierarchy
+### 6.2 Configurable TTL Cache (NEW)
+
+The query cache now supports query-type-aware TTL settings:
+
+| Query Type | TTL | Use Case |
+|------------|-----|----------|
+| `schema` | 3600s (1 hour) | Schema discovery queries |
+| `aggregation` | 600s (10 min) | Summary/aggregation queries |
+| `realtime` | 60s (1 min) | Recent data queries |
+| `default` | 300s (5 min) | Standard queries |
+
+**Cache Operations:**
+- `cache_stats`: Get detailed cache statistics
+- `cleanup_cache`: Remove expired entries
+
+### 6.3 Caching Hierarchy
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -457,9 +500,56 @@ CREATE TABLE embeddings (
 
 ---
 
-## 7. Security Model
+## 7. Multi-Cluster Support (NEW in v2.1.1)
 
-### 7.1 Authentication Flow
+### 7.1 Table Location Tracking
+
+The server tracks which tables exist in which clusters/databases:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                Multi-Cluster Table Registry                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Table: SecurityEvents                                           │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ Cluster: prod-east.kusto.windows.net                      │  │
+│  │ Database: SecurityLogs                                     │  │
+│  │ Last Seen: 2024-12-20T10:30:00                            │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ Cluster: prod-west.kusto.windows.net                      │  │
+│  │ Database: SecurityLogs                                     │  │
+│  │ Last Seen: 2024-12-20T09:15:00                            │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  API Methods (MemoryManager):                                    │
+│  - register_table_location(table, cluster, database)             │
+│  - get_table_locations(table_name) -> List[Dict]                 │
+│  - is_multi_cluster_table(table_name) -> bool                    │
+│  - get_all_table_locations() -> Dict[str, List[Dict]]            │
+│  - remove_table_location(table, cluster, database)               │
+│                                                                  │
+│  MCP Operations (schema_memory tool):                            │
+│  - list_multi_cluster_tables: List all tracked tables            │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 7.2 Use Cases
+
+| Scenario | Approach |
+|----------|----------|
+| **Data Replication** | Query from nearest cluster for lower latency |
+| **DR/HA Setup** | Failover to secondary cluster if primary unavailable |
+| **Federated Queries** | Know which clusters have specific tables |
+| **Schema Comparison** | Detect schema differences across clusters |
+
+---
+
+## 8. Security Model
+
+### 8.1 Authentication Flow
 
 ```mermaid
 flowchart TD
@@ -482,7 +572,7 @@ flowchart TD
     style J fill:#1a1f3b,stroke:#26ffa4,stroke-width:2px,color:#ccfff3
 ```
 
-### 7.2 Security Principles
+### 8.2 Security Principles
 
 | Principle | Implementation |
 |-----------|----------------|
@@ -494,7 +584,7 @@ flowchart TD
 
 ---
 
-## 8. Module Reference
+## 9. Module Reference
 
 ### File Structure
 
@@ -505,7 +595,7 @@ mcp_kql_server/
 ├── mcp_server.py        # MCP tool definitions
 ├── execute_kql.py       # Query execution engine
 ├── memory.py            # SQLite-backed memory manager
-├── utils.py             # Utilities (QueryProcessor, ErrorHandler)
+├── utils.py             # Utilities (cluster normalization, schema helpers, ErrorHandler)
 ├── kql_auth.py          # Azure authentication
 ├── kql_validator.py     # KQL syntax validation
 ├── ai_prompts.py        # NL2KQL prompt templates
@@ -546,6 +636,11 @@ from mcp_kql_server import (
 
 ## Conclusion
 
-The MCP KQL Server v2.2.0 architecture provides a robust, performant, and secure foundation for AI-augmented KQL query execution. The addition of connection pooling, batch execution, and performance monitoring in this version significantly improves throughput and resource utilization.
+The MCP KQL Server v2.1.1 architecture provides a robust, performant, and secure foundation for AI-augmented KQL query execution. Key enhancements in this version include:
+
+- **Configurable TTL Cache**: Query-type-aware caching with automatic expiration
+- **Multi-Cluster Support**: Track and query tables across multiple Azure Data Explorer clusters
+- **Health Check Scheduling**: Background connection health monitoring and automatic cleanup
+- **Enhanced Statistics**: Detailed cache and memory statistics via new schema_memory operations
 
 For questions or contributions, please refer to [CONTRIBUTING.md](../CONTRIBUTING.md).

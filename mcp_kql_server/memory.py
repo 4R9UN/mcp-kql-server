@@ -14,6 +14,7 @@ import sqlite3
 import json
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -44,6 +45,21 @@ TOON_TYPE_MAP = {
     'boolean': 'b',
     'dynamic': 'dyn',
     'guid': 'g'
+}
+
+RANKING_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "get",
+    "how", "i", "in", "into", "is", "it", "last", "latest", "list", "me",
+    "most", "of", "on", "or", "recent", "show", "table", "that", "the",
+    "their", "them", "these", "those", "to", "top", "what", "which", "with"
+}
+
+RANKING_TOKEN_SYNONYMS = {
+    "user": {"user", "users", "account", "accounts", "principal", "identity", "upn"},
+    "signin": {"signin", "signins", "login", "logon", "auth", "authentication"},
+    "alert": {"alert", "alerts", "severity", "incident"},
+    "device": {"device", "devices", "host", "hosts", "computer", "machine"},
+    "process": {"process", "processes", "command", "cmd"},
 }
 
 class SemanticSearch:
@@ -83,7 +99,7 @@ class SemanticSearch:
                     if SentenceTransformer:
                         self.model = SentenceTransformer(self.model_name)
                     logger.info("Loaded Semantic Search model: %s", self.model_name)
-                except Exception as e:
+                except (OSError, RuntimeError, ValueError) as e:
                     logger.warning("Failed to load SentenceTransformer: %s", e)
                 finally:
                     self._loading = False
@@ -101,7 +117,7 @@ class SemanticSearch:
             if not isinstance(embedding, np.ndarray):
                 embedding = np.array(embedding)
             return embedding.astype(np.float32).tobytes()
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError) as e:
             logger.error("Encoding failed: %s", e)
             return None
 
@@ -189,13 +205,28 @@ class MemoryManager:
                 )
             """)
 
-            # Query Cache table: Stores result hashes
+            # Query Cache table: Stores result hashes with configurable TTL
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS query_cache (
                     query_hash TEXT PRIMARY KEY,
                     result_json TEXT,
                     timestamp TIMESTAMP,
-                    row_count INTEGER
+                    row_count INTEGER,
+                    query_type TEXT DEFAULT 'default',
+                    ttl_seconds INTEGER DEFAULT 300,
+                    cluster TEXT,
+                    database TEXT
+                )
+            """)
+
+            # Multi-cluster table registry
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS table_locations (
+                    table_name TEXT,
+                    cluster TEXT,
+                    database TEXT,
+                    last_seen TIMESTAMP,
+                    PRIMARY KEY (table_name, cluster, database)
                 )
             """)
 
@@ -203,6 +234,9 @@ class MemoryManager:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_schemas_db ON schemas(cluster, database)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_queries_db ON queries(cluster, database)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_join_hints ON join_hints(table1, table2)")
+
+            # Run schema migrations for existing databases
+            self._migrate_schema(conn)
 
             # Learning Events table: Stores execution learning data
             conn.execute("""
@@ -216,10 +250,46 @@ class MemoryManager:
                 )
             """)
 
+    def _migrate_schema(self, conn: sqlite3.Connection):
+        """
+        Migrate existing database schema to add new columns.
+        This handles backwards compatibility for databases created before v2.1.1.
+        """
+        # Check for query_cache table columns and add if missing
+        try:
+            cursor = conn.execute("PRAGMA table_info(query_cache)")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+            
+            # Add new columns to query_cache if they don't exist
+            if 'query_type' not in existing_columns:
+                conn.execute("ALTER TABLE query_cache ADD COLUMN query_type TEXT DEFAULT 'default'")
+                logger.info("Migration: Added query_type column to query_cache")
+            
+            if 'ttl_seconds' not in existing_columns:
+                conn.execute("ALTER TABLE query_cache ADD COLUMN ttl_seconds INTEGER DEFAULT 300")
+                logger.info("Migration: Added ttl_seconds column to query_cache")
+            
+            if 'cluster' not in existing_columns:
+                conn.execute("ALTER TABLE query_cache ADD COLUMN cluster TEXT")
+                logger.info("Migration: Added cluster column to query_cache")
+            
+            if 'database' not in existing_columns:
+                conn.execute("ALTER TABLE query_cache ADD COLUMN database TEXT")
+                logger.info("Migration: Added database column to query_cache")
+                
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.debug("Migration check for query_cache: %s", e)
+
     def store_schema(self, cluster: str, database: str, table: str,
                      schema: Dict[str, Any], description: Optional[str] = None):
         """Store or update a table schema with embedding and description."""
         columns = schema.get("columns", {})
+        if not columns and schema:
+            # Accept either {"columns": {...}} or a raw {column_name: column_def} mapping.
+            columns = schema
+
+        normalized_cluster = self.normalize_cluster_uri(cluster)
 
         # Normalize columns to dict format if it's a list
         if isinstance(columns, list):
@@ -232,10 +302,6 @@ class MemoryManager:
                 elif isinstance(col, str):
                     normalized_cols[col] = {"data_type": "string"}
             columns = normalized_cols
-
-        # Generate embedding for table (name + column names)
-        col_names = " ".join(columns.keys())
-        embedding = self.semantic_search.encode(f"Table {table} contains columns: {col_names}")
 
         with self._lock, sqlite3.connect(self.db_path) as conn:
             # Check if columns exist (migration for existing DBs)
@@ -253,24 +319,56 @@ class MemoryManager:
             if description is None:
                 cursor = conn.execute(
                     "SELECT description FROM schemas WHERE cluster=? AND database=? AND table_name=?",
-                    (cluster, database, table)
+                    (normalized_cluster, database, table)
                 )
                 row = cursor.fetchone()
                 if row:
                     description = row[0]
 
+            existing_row = conn.execute(
+                """
+                SELECT columns_json, description
+                FROM schemas
+                WHERE cluster=? AND database=? AND table_name=?
+                """,
+                (normalized_cluster, database, table)
+            ).fetchone()
+
+            existing_columns = json.loads(existing_row[0]) if existing_row and existing_row[0] else {}
+            if not columns and existing_columns:
+                # Avoid overwriting a rich cached schema with an empty placeholder.
+                self.register_table_location(table, normalized_cluster, database)
+                logger.debug("Skipping empty schema overwrite for %s in %s", table, database)
+                return
+
+            if existing_columns == columns and (description == (existing_row[1] if existing_row else description)):
+                self.register_table_location(table, normalized_cluster, database)
+                logger.debug("Schema already indexed for %s in %s, skipping reindex", table, database)
+                return
+
+        # Generate embedding only when the schema is genuinely changing.
+        col_names = " ".join(columns.keys())
+        embedding = self.semantic_search.encode(f"Table {table} contains columns: {col_names}")
+
+        with self._lock, sqlite3.connect(self.db_path) as conn:
+
             conn.execute("""
                 INSERT OR REPLACE INTO schemas
                 (cluster, database, table_name, columns_json, embedding, description, last_updated)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (cluster, database, table, json.dumps(columns),
+            """, (normalized_cluster, database, table, json.dumps(columns),
                   embedding, description, datetime.now().isoformat()))
 
+        cache_key = f"db_schema_{normalized_cluster}_{database}"
+        if hasattr(self, '_schema_cache'):
+            self._schema_cache.pop(cache_key, None)
+        self.register_table_location(table, normalized_cluster, database)
         logger.debug("Stored schema for %s in %s", table, database)
 
     def add_successful_query(self, cluster: str, database: str, query: str,
                              description: str, execution_time_ms: float = 0.0):
         """Store a successful query with its description and embedding."""
+        normalized_cluster = self.normalize_cluster_uri(cluster)
         embedding = self.semantic_search.encode(f"{description} {query}")
 
         with self._lock, sqlite3.connect(self.db_path) as conn:
@@ -284,7 +382,7 @@ class MemoryManager:
                 INSERT INTO queries
                 (cluster, database, query, description, embedding, timestamp, execution_time_ms)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (cluster, database, query, description, embedding,
+            """, (normalized_cluster, database, query, description, embedding,
                   datetime.now().isoformat(), execution_time_ms))
 
     def add_global_successful_query(self, cluster: str, database: str, query: str,
@@ -312,6 +410,7 @@ class MemoryManager:
     def find_relevant_tables(self, cluster: str, database: str,
                              query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """Find tables semantically related to the query."""
+        normalized_cluster = self.normalize_cluster_uri(cluster)
         query_embedding = self.semantic_search.encode(query)
         if query_embedding is None:
             return []
@@ -322,7 +421,7 @@ class MemoryManager:
         with self._lock, sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "SELECT table_name, columns_json, embedding FROM schemas WHERE cluster = ? AND database = ?",
-                (cluster, database)
+                (normalized_cluster, database)
             )
 
             for row in cursor:
@@ -344,6 +443,7 @@ class MemoryManager:
     def find_similar_queries(self, cluster: str, database: str,
                                query: str, limit: int = 3) -> List[Dict[str, Any]]:
         """Find similar past queries using vector search."""
+        normalized_cluster = self.normalize_cluster_uri(cluster)
         query_embedding = self.semantic_search.encode(query)
         if query_embedding is None:
             return []
@@ -355,7 +455,7 @@ class MemoryManager:
         with self._lock, sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "SELECT query, description, embedding FROM queries WHERE cluster = ? AND database = ?",
-                (cluster, database)
+                (normalized_cluster, database)
             )
 
             for row in cursor:
@@ -374,33 +474,413 @@ class MemoryManager:
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:limit]
 
-    def cache_query_result(self, query: str, result_json: str, row_count: int):
-        """Cache query result."""
+    def _tokenize_ranking_text(self, text: str) -> List[str]:
+        """Tokenize free text and identifiers for retrieval/ranking heuristics."""
+        normalized = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', text or "")
+        tokens = re.findall(r'[A-Za-z_][A-Za-z0-9_]*', normalized.lower())
+        return [token for token in tokens if len(token) > 1 and token not in RANKING_STOPWORDS]
+
+    def _expand_query_tokens(self, tokens: List[str]) -> List[str]:
+        """Expand query tokens with a few high-value domain synonyms."""
+        expanded = set(tokens)
+        for token in list(expanded):
+            normalized = token[:-1] if token.endswith("s") else token
+            expanded.add(normalized)
+            for synonyms in RANKING_TOKEN_SYNONYMS.values():
+                if token in synonyms or normalized in synonyms:
+                    expanded.update(synonyms)
+        return list(expanded)
+
+    def _column_data_type(self, column_def: Any) -> str:
+        """Get a normalized column data type string."""
+        if isinstance(column_def, dict):
+            return str(column_def.get("data_type") or column_def.get("type") or "string").lower()
+        if isinstance(column_def, str):
+            return column_def.lower()
+        return "string"
+
+    def rank_tables_for_query(
+        self,
+        cluster: str,
+        database: str,
+        query: str,
+        limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Rank tables using hybrid lexical + semantic signals.
+
+        This provides a more reliable fallback when embeddings are unavailable and
+        keeps retrieval grounded in schema tokens and past successful queries.
+        """
+        schemas = self._get_database_schema(cluster, database)
+        if not schemas:
+            return []
+
+        semantic_scores = {
+            row["table"]: float(row.get("score", 0.0))
+            for row in self.find_relevant_tables(cluster, database, query, limit=max(limit * 3, 8))
+        }
+        similar_queries = self.find_similar_queries(cluster, database, query, limit=5)
+        query_tokens = set(self._expand_query_tokens(self._tokenize_ranking_text(query)))
+        query_lower = query.lower()
+        time_intent = any(
+            marker in query_lower
+            for marker in ("ago", "hour", "hours", "day", "days", "week", "weeks", "month",
+                           "months", "today", "yesterday", "recent", "latest", "trend", "over time")
+        )
+
+        ranked_tables = []
+        for schema in schemas:
+            table_name = schema["table"]
+            columns = schema.get("columns", {})
+            table_tokens = set(self._tokenize_ranking_text(table_name))
+            matched_columns = []
+            datetime_columns = 0
+
+            for column_name, column_def in columns.items():
+                column_tokens = set(self._tokenize_ranking_text(column_name))
+                overlap = query_tokens & column_tokens
+                if overlap:
+                    matched_columns.append(column_name)
+                if self._column_data_type(column_def) == "datetime":
+                    datetime_columns += 1
+
+            direct_table_mention = table_name.lower() in query_lower
+            semantic_score = semantic_scores.get(table_name, 0.0)
+            lexical_overlap = len(query_tokens & table_tokens)
+            column_overlap = len(matched_columns)
+            history_boost = sum(
+                1.0 for sq in similar_queries if table_name.lower() in sq.get("query", "").lower()
+            )
+            score = (
+                (4.5 if direct_table_mention else 0.0) +
+                lexical_overlap * 1.75 +
+                min(column_overlap, 6) * 0.9 +
+                semantic_score * 4.0 +
+                min(history_boost, 2.0) * 0.8 +
+                (0.75 if time_intent and datetime_columns else 0.0)
+            )
+
+            ranked_tables.append({
+                "table": table_name,
+                "columns": columns,
+                "score": round(score, 4),
+                "semantic_score": round(semantic_score, 4),
+                "matched_columns": matched_columns[:8],
+                "datetime_columns": datetime_columns,
+            })
+
+        ranked_tables.sort(
+            key=lambda item: (item["score"], len(item["matched_columns"]), item["table"].lower()),
+            reverse=True
+        )
+        return ranked_tables[:limit]
+
+    def fingerprint_columns(
+        self,
+        nl_query: str,
+        schema: Dict[str, Any],
+        similar_queries: Optional[List[Dict[str, Any]]] = None,
+        max_columns: int = 12
+    ) -> List[Dict[str, Any]]:
+        """
+        Rank the most relevant columns for an NL query.
+
+        The output is intentionally compact so the generator can build smaller
+        CAG prompts and more focused candidate queries.
+        """
+        columns = schema.get("columns", {}) or {}
+        if not columns:
+            return []
+
+        query_tokens = set(self._expand_query_tokens(self._tokenize_ranking_text(nl_query)))
+        query_lower = nl_query.lower()
+        time_intent = any(
+            marker in query_lower
+            for marker in ("ago", "hour", "hours", "day", "days", "week", "weeks", "month",
+                           "months", "today", "yesterday", "recent", "latest", "trend", "time")
+        )
+        aggregate_intent = any(
+            marker in query_lower
+            for marker in ("count", "how many", "total", "group", "per ", " by ", "top", "most", "trend")
+        )
+
+        history_hits: Dict[str, int] = {}
+        for similar_query in similar_queries or []:
+            for token in self._tokenize_ranking_text(similar_query.get("query", "")):
+                history_hits[token] = history_hits.get(token, 0) + 1
+
+        ranked_columns = []
+        for column_name, column_def in columns.items():
+            data_type = self._column_data_type(column_def)
+            column_tokens = set(self._tokenize_ranking_text(column_name))
+            overlap = query_tokens & column_tokens
+            exact_match = column_name.lower() in query_lower
+            history_score = history_hits.get(column_name.lower(), 0)
+            score = (
+                (5.0 if exact_match else 0.0) +
+                len(overlap) * 1.8 +
+                min(history_score, 3) * 0.75
+            )
+
+            if time_intent and (
+                data_type == "datetime" or {"time", "date", "timestamp"} & column_tokens
+            ):
+                score += 2.5
+
+            if aggregate_intent and data_type in {"string", "guid"}:
+                score += 1.0
+
+            if column_name.lower() in {"timegenerated", "timestamp", "reporttime"}:
+                score += 1.5
+
+            ranked_columns.append({
+                "name": column_name,
+                "data_type": data_type,
+                "score": round(score, 4),
+                "matched_terms": sorted(overlap),
+            })
+
+        ranked_columns.sort(
+            key=lambda item: (item["score"], item["data_type"] == "datetime", item["name"].lower()),
+            reverse=True
+        )
+
+        top_columns = ranked_columns[:max_columns]
+        if not any(column["score"] > 0 for column in top_columns):
+            return [
+                {
+                    "name": column_name,
+                    "data_type": self._column_data_type(columns[column_name]),
+                    "score": 0.0,
+                    "matched_terms": [],
+                }
+                for column_name in list(columns.keys())[:max_columns]
+            ]
+        return top_columns
+
+    def build_cag_bundle(
+        self,
+        cluster: str,
+        database: str,
+        user_query: str,
+        max_tables: int = 3,
+        max_columns: int = 12
+    ) -> Dict[str, Any]:
+        """
+        Build compact CAG context for generation and ranking.
+
+        Returns ranked tables, column fingerprints, similar queries, join hints,
+        and a compact TOON context string.
+        """
+        similar_queries = self.find_similar_queries(cluster, database, user_query, limit=3)
+        ranked_tables = self.rank_tables_for_query(cluster, database, user_query, limit=max_tables)
+
+        compact_schemas = []
+        enriched_tables = []
+        for table_info in ranked_tables:
+            fingerprinted_columns = self.fingerprint_columns(
+                user_query,
+                {"table": table_info["table"], "columns": table_info["columns"]},
+                similar_queries=similar_queries,
+                max_columns=max_columns,
+            )
+            selected_columns = {
+                column["name"]: table_info["columns"][column["name"]]
+                for column in fingerprinted_columns
+                if column["name"] in table_info["columns"]
+            }
+            enriched_tables.append({
+                **table_info,
+                "fingerprinted_columns": fingerprinted_columns,
+                "selected_columns": selected_columns,
+            })
+            compact_schemas.append({
+                "table": table_info["table"],
+                "columns": selected_columns,
+            })
+
+        join_hints = self.get_join_hints([table["table"] for table in ranked_tables]) if ranked_tables else []
+        return {
+            "tables": enriched_tables,
+            "similar_queries": similar_queries,
+            "join_hints": join_hints,
+            "context": self._to_toon(compact_schemas, similar_queries, join_hints),
+        }
+
+    def _build_cache_key(
+        self,
+        query: str,
+        cluster: Optional[str] = None,
+        database: Optional[str] = None,
+        cache_namespace: str = "default",
+    ) -> str:
+        """Build a cache key scoped to query text and execution context."""
         import hashlib
-        query_hash = hashlib.sha256(query.encode()).hexdigest()
+
+        normalized_cluster = self.normalize_cluster_uri(cluster or "")
+        payload = "||".join([
+            cache_namespace or "default",
+            normalized_cluster,
+            database or "",
+            query,
+        ])
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def cache_query_result(
+        self,
+        query: str,
+        result_json: str,
+        row_count: int,
+        query_type: str = "default",
+        ttl_seconds: int = 300,
+        cluster: Optional[str] = None,
+        database: Optional[str] = None,
+        cache_namespace: str = "default",
+    ):
+        """
+        Cache query result with configurable TTL per query type.
+        
+        Args:
+            query: The KQL query string
+            result_json: JSON-serialized query results
+            row_count: Number of rows in result
+            query_type: Type of query for TTL configuration (default, schema, aggregation, realtime)
+            ttl_seconds: Time-to-live in seconds (default: 300)
+            cluster: Cluster URL for multi-cluster tracking
+            database: Database name for multi-cluster tracking
+        
+        Query Type TTL Guidelines:
+            - 'schema': 3600s (1 hour) - table schemas change infrequently
+            - 'aggregation': 600s (10 min) - aggregate queries can be cached longer
+            - 'realtime': 60s (1 min) - time-sensitive queries
+            - 'default': 300s (5 min) - standard caching
+        """
+        query_hash = self._build_cache_key(
+            query,
+            cluster=cluster,
+            database=database,
+            cache_namespace=cache_namespace,
+        )
+
+        # Apply query type TTL overrides
+        ttl_map = {
+            "schema": 3600,
+            "aggregation": 600,
+            "realtime": 60,
+            "default": 300
+        }
+        effective_ttl = ttl_map.get(query_type, ttl_seconds)
+        normalized_cluster = self.normalize_cluster_uri(cluster or "") if cluster else None
 
         with self._lock, sqlite3.connect(self.db_path) as conn:
             conn.execute("""
-                INSERT OR REPLACE INTO query_cache (query_hash, result_json, timestamp, row_count)
-                VALUES (?, ?, ?, ?)
-            """, (query_hash, result_json, datetime.now().isoformat(), row_count))
+                INSERT OR REPLACE INTO query_cache 
+                (query_hash, result_json, timestamp, row_count, query_type, ttl_seconds, cluster, database)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (query_hash, result_json, datetime.now().isoformat(), row_count,
+                  query_type, effective_ttl, normalized_cluster, database))
 
-    def get_cached_result(self, query: str, ttl_seconds: int = 300) -> Optional[str]:
-        """Get cached result if valid."""
-        import hashlib
-        query_hash = hashlib.sha256(query.encode()).hexdigest()
+    def get_cached_result(
+        self,
+        query: str,
+        ttl_seconds: Optional[int] = None,
+        cluster: Optional[str] = None,
+        database: Optional[str] = None,
+        cache_namespace: str = "default",
+    ) -> Optional[str]:
+        """
+        Get cached result if valid, respecting stored TTL.
+        
+        Args:
+            query: The KQL query string
+            ttl_seconds: Override TTL (if None, uses stored TTL from cache entry)
+        
+        Returns:
+            Cached result JSON string, or None if not cached or expired
+        """
+        query_hash = self._build_cache_key(
+            query,
+            cluster=cluster,
+            database=database,
+            cache_namespace=cache_namespace,
+        )
 
         with self._lock, sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
-                "SELECT result_json, timestamp FROM query_cache WHERE query_hash = ?",
+                "SELECT result_json, timestamp, ttl_seconds FROM query_cache WHERE query_hash = ?",
                 (query_hash,)
             )
             row = cursor.fetchone()
             if row:
                 cached_time = datetime.fromisoformat(row[1])
-                if (datetime.now() - cached_time).total_seconds() < ttl_seconds:
+                # Use provided TTL or stored TTL, default to 300
+                effective_ttl = ttl_seconds if ttl_seconds is not None else (row[2] or 300)
+                if (datetime.now() - cached_time).total_seconds() < effective_ttl:
                     return row[0]
         return None
+
+    def clear_query_cache(
+        self,
+        cluster: Optional[str] = None,
+        database: Optional[str] = None,
+    ) -> int:
+        """Clear cached query results, optionally scoped to a cluster/database."""
+        clauses = []
+        params: List[str] = []
+
+        if cluster:
+            clauses.append("cluster = ?")
+            params.append(self.normalize_cluster_uri(cluster))
+        if database:
+            clauses.append("database = ?")
+            params.append(database)
+
+        delete_sql = "DELETE FROM query_cache"
+        if clauses:
+            delete_sql += " WHERE " + " AND ".join(clauses)
+
+        with self._lock, sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(delete_sql, params)
+            removed = cursor.rowcount
+            conn.commit()
+        logger.info("Cleared %d cached query results", removed)
+        return removed
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get detailed cache statistics."""
+        with self._lock, sqlite3.connect(self.db_path) as conn:
+            total = conn.execute("SELECT COUNT(*) FROM query_cache").fetchone()[0]
+            by_type = {}
+            cursor = conn.execute(
+                "SELECT query_type, COUNT(*), AVG(row_count) FROM query_cache GROUP BY query_type"
+            )
+            for row in cursor:
+                by_type[row[0] or 'default'] = {"count": row[1], "avg_rows": round(row[2] or 0, 2)}
+            
+            # Count expired entries
+            expired = conn.execute("""
+                SELECT COUNT(*) FROM query_cache 
+                WHERE (julianday('now') - julianday(timestamp)) * 86400 > COALESCE(ttl_seconds, 300)
+            """).fetchone()[0]
+            
+            return {
+                "total_cached": total,
+                "expired_entries": expired,
+                "by_query_type": by_type
+            }
+
+    def cleanup_expired_cache(self) -> int:
+        """Remove expired cache entries and return count of removed entries."""
+        with self._lock, sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                DELETE FROM query_cache 
+                WHERE (julianday('now') - julianday(timestamp)) * 86400 > COALESCE(ttl_seconds, 300)
+            """)
+            removed = cursor.rowcount
+            conn.commit()
+        logger.info("Removed %d expired cache entries", removed)
+        return removed
 
     def store_join_hint(self, table1: str, table2: str, condition: str):
         """Store a discovered join relationship."""
@@ -415,23 +895,25 @@ class MemoryManager:
         if not tables:
             return []
 
-        placeholders = ','.join(['?'] * len(tables))
         hints = []
+        if not tables:
+            return hints
 
+        placeholders = ','.join(['?'] * len(tables))
+        query = (
+            "SELECT table1, table2, join_condition FROM join_hints "
+            f"WHERE table1 IN ({placeholders}) OR table2 IN ({placeholders})"
+        )
         with self._lock, sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(f"""
-                SELECT table1, table2, join_condition FROM join_hints
-                WHERE table1 IN ({placeholders}) OR table2 IN ({placeholders})
-            """, tables + tables)
-
+            cursor = conn.execute(query, tables + tables)
             for row in cursor:
                 hints.append(f"{row[0]} joins with {row[1]} on {row[2]}")
-
         return list(set(hints))
 
     def _get_database_schema(self, cluster: str, database: str) -> List[Dict[str, Any]]:
         """Get schema from SQLite with caching."""
-        cache_key = f"db_schema_{cluster}_{database}"
+        normalized_cluster = self.normalize_cluster_uri(cluster)
+        cache_key = f"db_schema_{normalized_cluster}_{database}"
         # Simple in-memory cache check
         if hasattr(self, '_schema_cache') and cache_key in self._schema_cache:
             cached = self._schema_cache[cache_key]
@@ -441,7 +923,7 @@ class MemoryManager:
         with self._lock, sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "SELECT table_name, columns_json FROM schemas WHERE cluster = ? AND database = ?",
-                (cluster, database)
+                (normalized_cluster, database)
             )
             schemas = [{"table": row[0], "columns": json.loads(row[1])} for row in cursor]
 
@@ -451,23 +933,26 @@ class MemoryManager:
         self._schema_cache[cache_key] = {'data': schemas, 'ts': datetime.now()}
         return schemas
 
-    def get_relevant_context(self, cluster: str, database: str, user_query: str, max_tables: int = 20) -> str:
+    def get_relevant_context(
+        self,
+        cluster: str,
+        database: str,
+        user_query: str,
+        max_tables: int = 20,
+        max_columns: int = 12
+    ) -> str:
         """
         Optimized CAG: Get schema + similar queries + join hints in TOON format.
         Limited to max_tables to prevent token overflow.
         """
-        # 1. Get schemas (limited)
-        schemas = self._get_database_schema(cluster, database)[:max_tables]
-        table_names = [s["table"] for s in schemas]
-
-        # 2. Get similar queries (parallel-safe)
-        similar_queries = self.find_similar_queries(cluster, database, user_query, limit=3)
-
-        # 3. Get join hints
-        join_hints = self.get_join_hints(table_names) if table_names else []
-
-        # 4. Format as compact TOON
-        return self._to_toon(schemas, similar_queries, join_hints)
+        bundle = self.build_cag_bundle(
+            cluster,
+            database,
+            user_query,
+            max_tables=max_tables,
+            max_columns=max_columns,
+        )
+        return bundle["context"]
 
     def _to_toon(self, schemas: List[Dict], similar_queries: List[Dict],
                  join_hints: Optional[List[str]] = None) -> str:
@@ -521,9 +1006,14 @@ class MemoryManager:
             with self._lock, sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM schemas")
                 conn.execute("DELETE FROM queries")
+                conn.execute("DELETE FROM query_cache")
+                conn.execute("DELETE FROM table_locations")
+                conn.execute("DELETE FROM join_hints")
                 conn.execute("DELETE FROM learning_events")
+            if hasattr(self, '_schema_cache'):
+                self._schema_cache.clear()
             return True
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             logger.error("Failed to clear memory: %s", e)
             return False
 
@@ -535,21 +1025,42 @@ class MemoryManager:
         return _normalize(uri) if uri else ""
 
     def get_memory_stats(self) -> Dict[str, Any]:
-        """Get statistics about the memory database."""
+        """Get statistics about the memory database including cache stats."""
         with self._lock, sqlite3.connect(self.db_path) as conn:
             schema_count = conn.execute("SELECT COUNT(*) FROM schemas").fetchone()[0]
             query_count = conn.execute("SELECT COUNT(*) FROM queries").fetchone()[0]
             learning_count = 0
+            learning_by_type: Dict[str, int] = {}
             try:
                 learning_count = conn.execute("SELECT COUNT(*) FROM learning_events").fetchone()[0]
+                cursor = conn.execute(
+                    "SELECT execution_type, COUNT(*) FROM learning_events GROUP BY execution_type"
+                )
+                learning_by_type = {row[0]: row[1] for row in cursor.fetchall() if row[0]}
             except sqlite3.OperationalError:
                 pass
+            
+            # Multi-cluster table count
+            multi_cluster_count = 0
+            try:
+                multi_cluster_count = conn.execute(
+                    "SELECT COUNT(DISTINCT table_name) FROM table_locations"
+                ).fetchone()[0]
+            except sqlite3.OperationalError:
+                pass
+            
             db_size = self.db_path.stat().st_size if self.db_path.exists() else 0
+
+        # Include cache stats
+        cache_stats = self.get_cache_stats()
 
         return {
             "schema_count": schema_count,
             "query_count": query_count,
             "learning_count": learning_count,
+            "learning_by_type": learning_by_type,
+            "multi_cluster_tables": multi_cluster_count,
+            "cache_stats": cache_stats,
             "db_size_bytes": db_size,
             "db_path": str(self.db_path)
         }
@@ -651,6 +1162,153 @@ class MemoryManager:
         """Compatibility method for legacy save_corpus calls (no-op)."""
         # This is intentionally empty for backwards compatibility
         return None
+
+    # ==================== Multi-Cluster Support Methods ====================
+
+    def register_table_location(
+        self, table_name: str, cluster: str, database: str
+    ) -> bool:
+        """
+        Register a table's location (cluster/database) for multi-cluster support.
+        
+        Args:
+            table_name: Name of the table
+            cluster: Cluster URL
+            database: Database name
+            
+        Returns:
+            True if registered successfully, False otherwise
+        """
+        try:
+            with self._lock, sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO table_locations 
+                    (table_name, cluster, database, last_seen)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (table_name, cluster, database, datetime.now().isoformat())
+                )
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logging.error("Failed to register table location: %s", e)
+            return False
+
+    def get_table_locations(self, table_name: str) -> List[Dict[str, str]]:
+        """
+        Get all known locations (cluster/database pairs) for a table.
+        
+        Args:
+            table_name: Name of the table
+            
+        Returns:
+            List of dicts with 'cluster', 'database', 'last_seen' keys
+        """
+        try:
+            with self._lock, sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT cluster, database, last_seen 
+                    FROM table_locations 
+                    WHERE table_name = ?
+                    ORDER BY last_seen DESC
+                    """,
+                    (table_name,)
+                )
+                return [
+                    {"cluster": row[0], "database": row[1], "last_seen": row[2]}
+                    for row in cursor.fetchall()
+                ]
+        except sqlite3.Error as e:
+            logging.error("Failed to get table locations: %s", e)
+            return []
+
+    def is_multi_cluster_table(self, table_name: str) -> bool:
+        """
+        Check if a table exists in multiple clusters.
+        
+        Args:
+            table_name: Name of the table
+            
+        Returns:
+            True if table is found in more than one cluster
+        """
+        try:
+            with self._lock, sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT cluster) 
+                    FROM table_locations 
+                    WHERE table_name = ?
+                    """,
+                    (table_name,)
+                )
+                count = cursor.fetchone()[0]
+                return count > 1
+        except sqlite3.Error as e:
+            logging.error("Failed to check multi-cluster status: %s", e)
+            return False
+
+    def get_all_table_locations(self) -> Dict[str, List[Dict[str, str]]]:
+        """
+        Get all registered tables and their locations.
+        
+        Returns:
+            Dict mapping table names to lists of location dicts
+        """
+        try:
+            with self._lock, sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT table_name, cluster, database, last_seen 
+                    FROM table_locations 
+                    ORDER BY table_name, last_seen DESC
+                    """
+                )
+                result: Dict[str, List[Dict[str, str]]] = {}
+                for row in cursor.fetchall():
+                    table_name = row[0]
+                    if table_name not in result:
+                        result[table_name] = []
+                    result[table_name].append({
+                        "cluster": row[1],
+                        "database": row[2],
+                        "last_seen": row[3]
+                    })
+                return result
+        except sqlite3.Error as e:
+            logging.error("Failed to get all table locations: %s", e)
+            return {}
+
+    def remove_table_location(
+        self, table_name: str, cluster: str, database: str
+    ) -> bool:
+        """
+        Remove a specific table location entry.
+        
+        Args:
+            table_name: Name of the table
+            cluster: Cluster URL
+            database: Database name
+            
+        Returns:
+            True if removed successfully
+        """
+        try:
+            with self._lock, sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    DELETE FROM table_locations 
+                    WHERE table_name = ? AND cluster = ? AND database = ?
+                    """,
+                    (table_name, cluster, database)
+                )
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logging.error("Failed to remove table location: %s", e)
+            return False
 
 # Global instance
 _memory_manager = None

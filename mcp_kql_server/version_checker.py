@@ -54,9 +54,11 @@ def fetch_latest_pypi_version(timeout: int = 5) -> Optional[str]:
             if response.status_code == 200:
                 data = response.json()
                 return data.get("info", {}).get("version")
-        except Exception as e:
+        except ImportError:
+            logger.debug("requests library not available for PyPI version check.")
+        except (OSError, ValueError, TypeError) as e:
             logger.debug("Failed to fetch PyPI version with requests: %s", e)
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.debug("Failed to fetch PyPI version: %s", e)
 
     return None
@@ -81,7 +83,7 @@ def compare_versions(current: str, latest: str) -> int:
             return 1
         else:
             return 0
-    except Exception:
+    except (TypeError, ValueError):
         # Fallback to string comparison
         if current < latest:
             return -1
@@ -153,7 +155,6 @@ def install_update() -> bool:
             timeout=120,
             check=False  # We handle the return code ourselves
         )
-
         if result.returncode == 0:
             logger.info("Update installed successfully")
             return True
@@ -187,7 +188,7 @@ def get_update_notification() -> Optional[str]:
                 f"|  Run: pip install --upgrade {PYPI_PACKAGE_NAME:<20}       |\n"
                 f"+---------------------------------------------------------------+\n"
             )
-    except Exception:
+    except (OSError, ValueError):
         pass
 
     return None
@@ -219,6 +220,6 @@ def startup_version_check(auto_update: bool = False, silent: bool = False) -> Tu
                 )
 
         return result["update_available"], result["message"]
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.debug("Version check failed: %s", e)
         return False, f"Version check failed: {e}"

@@ -1,6 +1,6 @@
 # API Reference - MCP KQL Server
 
-**Version**: 2.2.0
+**Version**: 2.1.1
 **Last Updated**: December 2025
 
 ---
@@ -103,7 +103,7 @@ Manage schema discovery, caching, and AI context generation.
 | `list_tables` | List all tables in a database |
 | `get_context` | Get AI-friendly context for tables |
 | `generate_report` | Generate analysis report with visualizations |
-| `clear_cache` | Clear cached schema data |
+| `clear_cache` | Clear cached query results |
 | `get_stats` | Get memory usage statistics |
 | `refresh_schema` | Force refresh schema for a database |
 
@@ -178,37 +178,31 @@ memory = MemoryManager(db_path="/custom/path/memory.db")
 
 ### 2.2 Methods
 
-#### store_table_schema
+#### store_schema
 
 Store schema information for a table.
 
 ```python
-def store_table_schema(
+def store_schema(
     self,
     cluster: str,
     database: str,
     table: str,
-    columns: Dict[str, str],
-    row_count: Optional[int] = None,
-    source: str = "discovery"
-) -> Dict[str, Any]
+    schema: Dict[str, Any],
+    description: Optional[str] = None
+) -> None
 ```
 
 **Parameters:**
 - `cluster`: Cluster URL
 - `database`: Database name
 - `table`: Table name
-- `columns`: Dictionary of column_name -> data_type
-- `row_count`: Optional row count
-- `source`: Source of schema ("discovery", "manual", "preload")
+- `schema`: Schema dictionary or `{"columns": {...}}` payload
+- `description`: Optional description preserved alongside the schema
 
 **Returns:**
 ```python
-{
-    "stored": True,
-    "table": "StormEvents",
-    "columns_count": 25
-}
+# Stores/updates the cached schema and semantic index in-place.
 ```
 
 ---
@@ -231,9 +225,8 @@ def get_table_schema(
 {
     "table": "StormEvents",
     "columns": {"StartTime": "datetime", ...},
-    "row_count": 59066,
-    "discovered_at": "2024-12-28T10:00:00Z",
-    "ai_context": "..."
+    "last_updated": "2024-12-28T10:00:00Z",
+    "description": "..."
 }
 # Or None if not cached
 ```
@@ -314,25 +307,21 @@ def get_memory_stats(self) -> Dict[str, Any]
 
 ---
 
-#### clear_cache
+#### clear_query_cache
 
-Clear cached data.
+Clear cached query results.
 
 ```python
-def clear_cache(
+def clear_query_cache(
     self,
     cluster: Optional[str] = None,
     database: Optional[str] = None
-) -> Dict[str, int]
+) -> int
 ```
 
 **Returns:**
 ```python
-{
-    "schemas_cleared": 15,
-    "queries_cleared": 234,
-    "embeddings_cleared": 15
-}
+42  # number of cached query results removed
 ```
 
 ---
@@ -490,19 +479,19 @@ summary = monitor.get_metrics_summary()
 
 ## 4. Utility Functions
 
-### 4.1 Query Processing
+### 4.1 Query and identifier helpers
 
 ```python
-from mcp_kql_server.utils import QueryProcessor
+from mcp_kql_server.utils import bracket_if_needed, normalize_cluster_uri, sanitize_filename
 
-processor = QueryProcessor()
+normalize_cluster_uri("help.kusto.windows.net")
+# "https://help.kusto.windows.net"
 
-# Clean query
-cleaned = processor.clean_query("  StormEvents | take 10  ")
+bracket_if_needed("where")
+# "['where']"
 
-# Extract entities
-entities = processor.extract_entities("StormEvents | where State == 'TX'")
-# {"tables": ["StormEvents"], "columns": ["State"], ...}
+sanitize_filename("bad:file/name?.json")
+# "bad_file_name_.json"
 ```
 
 ### 4.2 Error Handling
@@ -598,7 +587,7 @@ from mcp_kql_server.constants import (
     SERVER_NAME,
     __version__,
     DEFAULT_QUERY_TIMEOUT,
-    MAX_ROWS_DEFAULT,
+    LIMITS,
     CONNECTION_CONFIG,
     ERROR_HANDLING_CONFIG
 )
@@ -627,7 +616,7 @@ from mcp_kql_server.constants import (
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2.2.0 | Dec 2025 | Added performance module, connection pooling |
+| 2.1.1 | Dec 2025 | Improved CAG ranking, cache scoping, and runtime stability |
 | 2.1.0 | Dec 2025 | Schema-only NL2KQL, version checker |
 | 2.0.9 | Nov 2025 | CAG updates, SQLite migration |
 

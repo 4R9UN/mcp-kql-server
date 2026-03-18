@@ -5,18 +5,18 @@ Use this checklist when preparing a new release.
 ## Pre-Release Steps
 
 ### 1. Update Version Numbers
-Update version in all files to the new version (e.g., `2.1.0`):
+Update version in all current-release files to the new version (e.g., `2.1.1`):
 
-- [ ] `pyproject.toml` - line 3: `version = "2.1.0"`
-- [ ] `mcp_kql_server/__init__.py` - line 22: `__version__ = "2.1.0"`
-- [ ] `mcp_kql_server/constants.py` - line 19: `__version__ = "2.1.0"`
-- [ ] `mcp_kql_server/constants.py` - line 88: `FASTAPI_VERSION = "2.1.0"`
-- [ ] `server.json` - line 5: `"version": "2.1.0"`
-- [ ] `server.json` - line 10: `"version": "2.1.0"` (in packages array)
+- [ ] `pyproject.toml` - line 3: `version = "2.1.1"`
+- [ ] `mcp_kql_server/__init__.py` - line 22: `__version__ = "2.1.1"`
+- [ ] `mcp_kql_server/constants.py` - line 19: `__version__ = "2.1.1"`
+- [ ] `mcp_kql_server/constants.py` - line 88: `FASTAPI_VERSION = "2.1.1"`
+- [ ] `server.json` - line 5: `"version": "2.1.1"`
+- [ ] `server.json` - line 10: `"version": "2.1.1"` (in packages array)
 
 **Quick version bump:**
 ```bash
-python .github/bump_version.py 2.0.9 2.1.0
+python .github/bump_version.py 2.1.0 2.1.1
 ```
 
 ### 2. Update Release Notes
@@ -33,7 +33,7 @@ ruff check .
 pylint mcp_kql_server/
 
 # Run tests
-pytest tests/ -v
+python -m pytest -q
 
 # Verify version consistency
 python -c "import tomli; print(f'pyproject.toml: {tomli.load(open(\"pyproject.toml\", \"rb\"))[\"project\"][\"version\"]}')"
@@ -48,7 +48,7 @@ python -m build
 # Test installation in virtual environment
 python -m venv test_env
 test_env\Scripts\activate
-pip install dist/mcp_kql_server-2.1.0-py3-none-any.whl
+pip install dist/mcp_kql_server-2.1.1-py3-none-any.whl
 # Test the package
 python -c "from mcp_kql_server import __version__; print(f'Version: {__version__}')"
 deactivate
@@ -60,7 +60,7 @@ rm -r test_env
 ### 5. Commit Changes
 ```bash
 git add .
-git commit -m "Bump version to 2.1.0"
+git commit -m "Bump version to 2.1.1"
 git push origin main
 ```
 
@@ -76,8 +76,8 @@ twine upload dist/*
 ### 7. Create GitHub Release
 ```bash
 # Create and push tag
-git tag v2.1.0
-git push origin v2.1.0
+git tag v2.1.1
+git push origin v2.1.1
 ```
 
 ### 8. Verify Automated Publishing
@@ -127,7 +127,6 @@ Ensure these files are updated/present for each release:
 - [ ] `mcp_kql_server/performance.py` - Performance utilities
 - [ ] `mcp_kql_server/utils.py` - Utilities
 - [ ] `mcp_kql_server/ai_prompts.py` - AI prompts
-- [ ] `mcp_kql_server/mcp_registry.py` - Registry support
 - [ ] `mcp_kql_server/py.typed` - Type marker
 
 ### Documentation Files
@@ -171,14 +170,14 @@ Ensure these files are updated/present for each release:
 Use the Python script for automatic version bumping:
 ```bash
 # Update all version files automatically
-python .github/bump_version.py 2.0.9 2.1.0
+python .github/bump_version.py 2.1.0 2.1.1
 ```
 
 Or use this bash script for manual updates:
 ```bash
 # Save this as bump_version.sh
-OLD_VERSION="2.0.9"
-NEW_VERSION="2.1.0"
+OLD_VERSION="2.1.0"
+NEW_VERSION="2.1.1"
 
 # Update all version files
 sed -i "s/$OLD_VERSION/$NEW_VERSION/g" pyproject.toml
@@ -193,7 +192,7 @@ echo "Remember to update RELEASE_NOTES.md manually!"
 ## Version History Template
 
 ```markdown
-## 📦 **v2.1.0 - [Release Title]**
+## 📦 **v2.1.1 - [Release Title]**
 
 > **[Brief Description]** 🚀
 
@@ -202,7 +201,7 @@ echo "Remember to update RELEASE_NOTES.md manually!"
 **Email**: arjuntrivedi42@yahoo.com
 **Repository**: https://github.com/4R9UN/mcp-kql-server
 
-### 🚀 **What's New in v2.1.0**
+### 🚀 **What's New in v2.1.1**
 
 #### **1. [Feature Category]**
 - **Feature 1**: Description

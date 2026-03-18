@@ -1,6 +1,6 @@
 # Troubleshooting Guide - MCP KQL Server
 
-**Version**: 2.2.0
+**Version**: 2.1.1
 **Last Updated**: December 2025
 
 ---
@@ -25,11 +25,11 @@
 ### Health Check Command
 
 ```bash
-# Check if server is working
-python -m mcp_kql_server --version
+# Check that the package imports and reports the current version
+python -c "from mcp_kql_server import __version__; print(__version__)"
 
-# Test basic connectivity
-python -c "from mcp_kql_server import check_for_updates; print(check_for_updates())"
+# Optional: test version check wiring without starting the server loop
+python -c "from mcp_kql_server.version_checker import check_for_updates; print(check_for_updates())"
 ```
 
 ### Diagnostic Script
@@ -225,10 +225,8 @@ for dep in deps:
    ```
 
 2. **Refresh schema cache:**
-   ```python
-   # Clear and rediscover
-   memory.clear_cache(cluster, database)
-   # Schema will be rediscovered on next query
+   ```text
+   schema_memory(operation="refresh_schema", cluster_url="...", database="...")
    ```
 
 3. **Use schema memory tool:**
@@ -330,16 +328,45 @@ for dep in deps:
 **Solutions:**
 
 1. **Force schema refresh:**
-   ```python
-   from mcp_kql_server.memory import get_memory_manager
-   memory = get_memory_manager()
-   memory.clear_cache(cluster_url, database)
+   ```text
+   schema_memory(operation="refresh_schema", cluster_url="...", database="...")
    ```
 
 2. **Use refresh_schema operation:**
    ```
    schema_memory(operation="refresh_schema", cluster_url="...", database="...")
    ```
+
+---
+
+### Problem: Generated or client-provided KQL uses wrong columns even though schema exists
+
+**Symptoms:**
+- Validation errors for columns such as `Timestamp`, `EventTime`, or generic aliases
+- The table schema is already cached, but the query still uses column names that do not exist in that table
+
+**What v2.1.1 does now:**
+- Reuses cached schema before live re-discovery
+- Avoids overwriting rich cached schema with empty placeholder indexing
+- Repairs direct KQL against the real table schema when a safe replacement can be proven
+
+**Best practice:**
+
+1. **Request strict table-scoped context before generating KQL:**
+   ```
+   schema_memory(
+     operation="get_context",
+     cluster_url="...",
+     database="...",
+     table_name="CreateProcessEvents",
+     natural_language_query="investigate the suspicious process execution"
+   )
+   ```
+
+2. **Use only the returned `allowed_columns` and `recommended_columns`.**
+
+3. **If direct KQL still contains wrong columns, run it through `execute_kql_query`:**
+   The server will attempt a schema-grounded repair and only execute if the repaired query validates fully.
 
 ---
 
@@ -432,7 +459,9 @@ for dep in deps:
 
 1. **Clear old embeddings:**
    ```python
-   memory.clear_cache()
+   from mcp_kql_server.memory import get_memory_manager
+   memory = get_memory_manager()
+   memory.clear_memory()
    ```
 
 2. **Reduce embedding model size:**
@@ -497,7 +526,7 @@ for dep in deps:
 
 3. **Install specific version:**
    ```bash
-   pip install mcp-kql-server==2.2.0
+   pip install mcp-kql-server==2.1.1
    ```
 
 ---
