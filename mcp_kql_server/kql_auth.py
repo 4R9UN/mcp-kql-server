@@ -44,19 +44,25 @@ def kql_auth():
         env = os.environ.copy()
         subprocess.run(
             [az_command, "config", "set", "core.login_experience_v2=off"],
-            env=env, capture_output=True, text=True, check=True
+            env=env, capture_output=True, text=True, check=True, timeout=60
         )
         subprocess.run(
             [az_command, "account", "get-access-token"],
-            capture_output=True, text=True, check=True
+            env=env, capture_output=True, text=True, check=True, timeout=60
         )
         logger.info("User is authenticated with Azure CLI.")
         return {"authenticated": True, "message": "User is authenticated."}
+    except subprocess.TimeoutExpired:
+        logger.error("Authentication check timed out.")
+        return {"authenticated": False, "message": "Authentication check timed out."}
     except subprocess.CalledProcessError as e:
         logger.warning("User is not authenticated: %s", e.stderr)
         return {"authenticated": False, "message": "User is not authenticated."}
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.error("Authentication check failed: %s", str(e))
+        return {"authenticated": False, "message": str(e)}
+    except Exception as e:  # Required for test compatibility (test_kql_auth_exception)
+        logger.error("Unexpected error during authentication: %s", str(e))
         return {"authenticated": False, "message": str(e)}
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -75,7 +81,7 @@ def trigger_az_cli_auth():
     try:
         subprocess.run(
             [az_command, "config", "set", "core.login_experience_v2=off"],
-            env=env, capture_output=True, text=True, check=True
+            env=env, capture_output=True, text=True, check=True, timeout=60
         )
         auth_result = subprocess.run(
             [az_command, "login", "--use-device-code"],
@@ -89,7 +95,7 @@ def trigger_az_cli_auth():
     except subprocess.TimeoutExpired:
         logger.error("Authentication timed out.")
         return {"authenticated": False, "message": "Authentication timed out. Please try again."}
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.error("Authentication attempt failed: %s", str(e))
         return {"authenticated": False, "message": str(e)}
 

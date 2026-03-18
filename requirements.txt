@@ -1,7 +1,7 @@
 # MCP KQL Server Dependencies
 
 # Core MCP Framework
-fastmcp>=2.0.0,<3.0.0
+fastmcp>=2.10.0,<3.0.0
 pydantic>=2.0.0,<3.0.0
 typing-extensions>=4.0.0,<5.0.0
 
@@ -9,6 +9,8 @@ typing-extensions>=4.0.0,<5.0.0
 azure-cli
 azure-kusto-data>=4.0.0,<6.0.0
 azure-identity>=1.15.0,<2.0.0
+authlib>=1.3.0,<2.0.0
+azure-core>=1.30.0,<2.0.0
 
 # Data Handling and AI/ML
 pandas
@@ -20,14 +22,14 @@ numpy>=1.21.0,<3.0.0
 httpx>=0.25.0,<1.0.0
 requests>=2.31.0,<3.0.0
 
-# Utilities
+
 tenacity>=8.0.0,<10.0.0
 tabulate>=0.9.0,<1.0.0
 python-dotenv>=1.0.0,<2.0.0
 click>=8.0.0,<9.0.0
 colorama>=0.4.6,<1.0.0
 
-# Testing
+
 pytest
 
 # -- Standard Libraries (included with Python, not installed via pip) --

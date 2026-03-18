@@ -5,40 +5,30 @@ Author: Arjun Trivedi
 Email: arjuntrivedi42@yahoo.com
 """
 
+import mcp_kql_server
+
+from mcp_kql_server import __author__, __email__, __version__ as pkg_version
+from mcp_kql_server.constants import __version__ as const_version
+from mcp_kql_server.utils import bracket_if_needed, normalize_cluster_uri, sanitize_filename
+
 
 def test_package_imports():
     """Test that package imports work correctly."""
-    try:
-        import mcp_kql_server
-        assert hasattr(mcp_kql_server, "__version__")
-        assert hasattr(mcp_kql_server, "__author__")
-        assert mcp_kql_server.__version__ == "2.1.0"
-        assert mcp_kql_server.__author__ == "Arjun Trivedi"
-    except ImportError:
-        pass
+    assert hasattr(mcp_kql_server, "__version__")
+    assert hasattr(mcp_kql_server, "__author__")
+    assert mcp_kql_server.__version__ == "2.1.1"
+    assert mcp_kql_server.__author__ == "Arjun Trivedi"
 
 
 def test_version_consistency():
     """Test that version is consistent across modules."""
-    try:
-        from mcp_kql_server import __version__ as pkg_version
-        from mcp_kql_server.constants import __version__ as const_version
-        # Both should match - 2.1.0
-        assert pkg_version == const_version == "2.1.0"
-    except ImportError:
-        pass
+    assert pkg_version == const_version == "2.1.1"
 
 
 def test_author_attribution():
     """Test that author information is properly set."""
-    try:
-        from mcp_kql_server import __author__, __email__
-
-        assert __author__ == "Arjun Trivedi"
-        assert __email__ == "arjuntrivedi42@yahoo.com"
-    except ImportError:
-        # Skip test if package not available in CI
-        pass
+    assert __author__ == "Arjun Trivedi"
+    assert __email__ == "arjuntrivedi42@yahoo.com"
 
 
 def test_module_structure():
@@ -61,14 +51,6 @@ def test_module_structure():
 
 def test_basic_functionality():
     """Test basic package functionality without external dependencies."""
-    try:
-        # Test that we can import key functions
-        from mcp_kql_server.utils import is_debug_mode, truncate_string
-
-        # Test basic utility functions
-        assert truncate_string("Hello World", 5) == "He..."
-        assert isinstance(is_debug_mode(), bool)
-
-    except ImportError:
-        # Skip test if modules not available
-        pass
+    assert sanitize_filename("bad:file/name?.txt") == "bad_file_name_.txt"
+    assert normalize_cluster_uri("help.kusto.windows.net") == "https://help.kusto.windows.net"
+    assert bracket_if_needed("where") == "['where']"

@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 
 # Version information - Single source of truth from pyproject.toml
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 VERSION = __version__
 MCP_PROTOCOL_VERSION = "2024-11-05"
 

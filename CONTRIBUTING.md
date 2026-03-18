@@ -71,22 +71,25 @@ source .venv/bin/activate
 ### Install Dependencies
 
 ```bash
-# Install in development mode with all dependencies
+# Install in development mode with the repo's source-of-truth metadata
 pip install -e ".[dev]"
 
-# Or install from requirements
-pip install -r requirements.txt
-pip install pytest pytest-cov pytest-asyncio pylint
+# Optional: runtime-only install without contributor tooling
+pip install -e .
 ```
+
+`pyproject.toml` is the single source of truth for package metadata and contributor tooling.
+Use `requirements.txt` only when you specifically need the legacy runtime dependency snapshot.
 
 ### Verify Installation
 
 ```bash
 # Run tests to verify setup
-python -m pytest tests/ -v
+python -m pytest -q
 
 # Check code quality
 python -m pylint mcp_kql_server/
+ruff check .
 ```
 
 ---
@@ -161,12 +164,13 @@ Closes #42
 
 2. **Run all tests:**
    ```bash
-   python -m pytest tests/ -v --cov=mcp_kql_server
+    python -m pytest --cov=mcp_kql_server -q
    ```
 
 3. **Check code quality:**
    ```bash
    python -m pylint mcp_kql_server/ --disable=C0301,C0114,C0115,C0116
+    ruff check .
    ```
 
 4. **Update documentation** if needed

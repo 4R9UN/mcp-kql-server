@@ -53,7 +53,7 @@ unauthorized data or causing denial of service.
 
 Severity: HIGH
 
-Affected Versions: 2.0.0 - 2.1.0
+Affected Versions: 2.0.0 - 2.1.1
 
 Reproduction Steps:
 1. Call execute_kql_query with query parameter containing malicious KQL
@@ -85,13 +85,14 @@ When using MCP KQL Server, follow these security best practices:
 
 ### Authentication
 
-```python
-# DO: Use Managed Identity in production
-from azure.identity import DefaultAzureCredential
-credential = DefaultAzureCredential()
+```bash
+# DO: Use Azure CLI locally
+az login
 
-# DON'T: Hardcode credentials
-# credential = ClientSecretCredential(tenant_id, client_id, "hardcoded_secret")  # BAD!
+# DO: In Azure-hosted deployments, assign a managed identity to the host
+# and grant that identity the required Azure Data Explorer permissions.
+
+# DON'T: Hardcode credentials or embed secrets in config files
 ```
 
 ### Configuration
@@ -143,7 +144,7 @@ MCP KQL Server includes these security features:
 
 | Feature | Description |
 |---------|-------------|
-| **Azure AD Authentication** | Supports Managed Identity, Service Principal, Device Code |
+| **Azure AD Authentication** | Local usage relies on Azure CLI auth; Azure-hosted deployments can pair the container with managed identity and RBAC |
 | **Query Validation** | Basic KQL syntax validation before execution |
 | **Connection Encryption** | All connections use TLS 1.2+ |
 | **No Credential Storage** | Credentials are never stored on disk |
@@ -187,7 +188,7 @@ MCP KQL Server includes these security features:
 |------|------------|
 | Unauthorized data access | Use Azure RBAC to limit database permissions |
 | Query injection | Validate and sanitize all user inputs |
-| Credential exposure | Use Managed Identity, never hardcode secrets |
+| Credential exposure | Use Azure CLI locally or managed identity in Azure-hosted environments; never hardcode secrets |
 | Data leakage in logs | Set appropriate log levels in production |
 | Cache tampering | Protect local file system permissions |
 
@@ -211,7 +212,7 @@ pip index versions mcp-kql-server
 # Update to latest
 pip install --upgrade mcp-kql-server
 
-# Enable auto-update checks (v2.1.0+)
+# Enable auto-update checks (v2.1.1+)
 # The server automatically checks for updates at startup
 ```
 

@@ -9,7 +9,7 @@ This module provides:
 - Health monitoring for connections
 
 Author: Arjun Trivedi
-Version: 2.2.0
+Version: 2.1.1
 """
 
 import asyncio
@@ -155,6 +155,7 @@ class KustoConnectionPool:
         # Connection storage: cluster_url -> OrderedDict of ConnectionInfo
         self._pools: Dict[str, OrderedDict[str, ConnectionInfo]] = {}
         self._pool_locks: Dict[str, threading.Lock] = {}
+        self._health_check_databases: Dict[str, str] = {}
         self._global_lock = threading.RLock()
 
         # Statistics
@@ -263,6 +264,20 @@ class KustoConnectionPool:
 
             raise ConnectionError(f"Unable to get connection for {normalized_url}")
 
+    def register_health_check_database(self, cluster_url: str, database: str) -> None:
+        """Register a database that can be used for lightweight health probes."""
+        from .utils import normalize_cluster_uri
+
+        normalized_url = normalize_cluster_uri(cluster_url)
+        if not database:
+            return
+
+        with self._global_lock:
+            self._health_check_databases[normalized_url] = database
+
+        if not self._health_checker_running:
+            self.start_health_checker()
+
     def release_client(self, cluster_url: str) -> None:
         """
         Release a client back to the pool.
@@ -339,6 +354,7 @@ class KustoConnectionPool:
 
     def close_all(self) -> None:
         """Close all connections in the pool."""
+        self.stop_health_checker()  # Stop health checker before closing
         with self._global_lock:
             for cluster_url in list(self._pools.keys()):
                 pool_lock = self._get_pool_lock(cluster_url)
@@ -348,6 +364,128 @@ class KustoConnectionPool:
                         self._recycle_connection(cluster_url, conn_id)
             self._pools.clear()
         logger.info("[POOL] All connections closed")
+
+    # =========================================================================
+    # Health Check Scheduling
+    # =========================================================================
+
+    def start_health_checker(self) -> None:
+        """
+        Start the background health checker thread.
+        
+        The health checker periodically:
+        - Tests connection health using a lightweight query
+        - Marks unhealthy connections for recycling
+        - Cleans up idle and expired connections
+        """
+        if self._health_checker_running:
+            logger.warning("[POOL] Health checker already running")
+            return
+        
+        self._health_checker_running = True
+        self._health_checker_thread = threading.Thread(
+            target=self._health_checker_loop,
+            name="KustoPoolHealthChecker",
+            daemon=True
+        )
+        self._health_checker_thread.start()
+        logger.info(
+            "[POOL] Health checker started (interval=%ds)", 
+            self._health_check_interval
+        )
+
+    def stop_health_checker(self) -> None:
+        """Stop the background health checker thread."""
+        if not self._health_checker_running:
+            return
+        
+        self._health_checker_running = False
+        if self._health_checker_thread and self._health_checker_thread.is_alive():
+            # Wait for thread to finish (with timeout)
+            self._health_checker_thread.join(timeout=5.0)
+        self._health_checker_thread = None
+        logger.info("[POOL] Health checker stopped")
+
+    def _health_checker_loop(self) -> None:
+        """Background loop for periodic health checks."""
+        while self._health_checker_running:
+            try:
+                self._run_health_checks()
+                self.cleanup_idle_connections()
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                # Must catch all to keep health checker alive
+                logger.error("[POOL] Health check error: %s", e)
+            
+            # Sleep in small intervals to allow quick shutdown
+            for _ in range(self._health_check_interval):
+                if not self._health_checker_running:
+                    break
+                time.sleep(1)
+
+    def _run_health_checks(self) -> None:
+        """Run health checks on all pooled connections."""
+        checked = 0
+        unhealthy = 0
+        
+        with self._global_lock:
+            cluster_urls = list(self._pools.keys())
+        
+        for cluster_url in cluster_urls:
+            pool_lock = self._get_pool_lock(cluster_url)
+            with pool_lock:
+                pool = self._pools.get(cluster_url, {})
+                for conn_id, conn_info in list(pool.items()):
+                    checked += 1
+                    is_healthy = self._check_connection_health(conn_info)
+                    conn_info.is_healthy = is_healthy
+                    conn_info.last_health_check = datetime.now()
+                    
+                    if not is_healthy:
+                        unhealthy += 1
+                        logger.warning(
+                            "[POOL] Unhealthy connection detected: %s/%s",
+                            cluster_url, conn_id
+                        )
+                        # Recycle unhealthy connections
+                        self._recycle_connection(cluster_url, conn_id)
+        
+        if checked > 0:
+            logger.debug(
+                "[POOL] Health check complete: %d checked, %d unhealthy",
+                checked, unhealthy
+            )
+
+    def _check_connection_health(self, conn_info: ConnectionInfo) -> bool:
+        """
+        Check if a connection is healthy using a lightweight query.
+        
+        Args:
+            conn_info: Connection information
+            
+        Returns:
+            True if connection is healthy, False otherwise
+        """
+        try:
+            client = conn_info.client
+            if not hasattr(client, 'execute'):
+                return False
+
+            health_database = self._health_check_databases.get(conn_info.cluster_url)
+            if not health_database:
+                # No registered database for this cluster yet, so skip the probe
+                return True
+
+            # Use a very lightweight query to test connection against a known database
+            result = client.execute(health_database, "print 1")
+            return result is not None
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Any error indicates unhealthy connection
+            logger.debug("[POOL] Health check failed: %s", e)
+            return False
+
+    def is_health_checker_running(self) -> bool:
+        """Check if the health checker is currently running."""
+        return self._health_checker_running
 
 
 # =============================================================================
@@ -546,15 +684,8 @@ class SchemaPreloader:
         total = len(tables)
         for idx, table in enumerate(tables):
             try:
-                # Use memory manager to cache schema
-                # store_schema expects schema dict, not individual columns/source args
-                memory.store_schema(
-                    cluster=cluster_url,
-                    database=database,
-                    table=table,
-                    schema={"columns": {}},  # Placeholder, will be discovered
-                    description="Preloaded at startup"
-                )
+                # Register presence only; do not overwrite an existing indexed schema.
+                memory.register_table_location(table, cluster_url, database)
                 results[table] = {"success": True, "preloaded": True}
 
                 if progress_callback:

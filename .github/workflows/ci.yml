@@ -149,7 +149,16 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install .
+        pip install -e ".[dev]"
+    - name: Run tests with coverage
+      run: |
+        python -m pytest --cov=mcp_kql_server --cov-report=term-missing --cov-report=xml -q
+    - name: Upload coverage artifact
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: coverage-report
+        path: coverage.xml
 
   publish-pypi:
     name: Publish to PyPI
