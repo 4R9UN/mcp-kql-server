@@ -16,12 +16,54 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check PyPI package availability
+        id: pypi-check
+        shell: bash
+        run: |
+          read -r PACKAGE_NAME PACKAGE_VERSION <<EOF
+          $(python3 - <<'PY'
+          import json
+
+          with open("server.json", encoding="utf-8") as handle:
+              server_manifest = json.load(handle)
+
+          package = server_manifest["packages"][0]
+          print(package["identifier"], package["version"])
+          PY
+          )
+          EOF
+
+          PYPI_URL="https://pypi.org/pypi/${PACKAGE_NAME}/${PACKAGE_VERSION}/json"
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" "${PYPI_URL}")
+
+          echo "package_name=${PACKAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
+
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "PyPI package ${PACKAGE_NAME}==${PACKAGE_VERSION} is available. Proceeding with MCP Registry publish."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "PyPI package ${PACKAGE_NAME}==${PACKAGE_VERSION} is not available yet (HTTP ${HTTP_STATUS})."
+            echo "Skipping MCP Registry publish until the matching PyPI release exists."
+          fi
+
       - name: Install MCP Publisher
+        if: steps.pypi-check.outputs.available == 'true'
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
 
       - name: Login to MCP Registry (GitHub OIDC)
+        if: steps.pypi-check.outputs.available == 'true'
         run: ./mcp-publisher login github-oidc
 
       - name: Publish to MCP Registry
+        if: steps.pypi-check.outputs.available == 'true'
         run: ./mcp-publisher publish
+
+      - name: Skip publish until PyPI release exists
+        if: steps.pypi-check.outputs.available != 'true'
+        run: |
+          echo "MCP Registry publish skipped."
+          echo "Expected PyPI package: ${{ steps.pypi-check.outputs.package_name }}==${{ steps.pypi-check.outputs.package_version }}"
+          echo "Publish the package to PyPI first, then rerun this workflow."
