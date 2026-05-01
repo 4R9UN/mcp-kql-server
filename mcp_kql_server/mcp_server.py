@@ -2012,12 +2012,129 @@ async def _schema_list_multi_cluster_tables_operation() -> str:
         })
 
 
+def _print_info(as_json: bool = False) -> None:
+    """Print server configuration and registered tools.
+
+    Renders human-readable text by default, or a machine-readable JSON
+    document when ``as_json`` is true.
+    """
+    from .version_checker import get_current_version
+    from . import constants as C
+
+    # Discover tools registered with FastMCP. Fall back to a static list if
+    # the FastMCP API surface changes between versions.
+    tools_info = []
+    try:
+        registry = getattr(mcp, "_tool_manager", None) or getattr(mcp, "tool_manager", None)
+        tool_map = getattr(registry, "_tools", None) if registry else None
+        if isinstance(tool_map, dict):
+            for name, t in tool_map.items():
+                desc = (getattr(t, "description", "") or "").strip().splitlines()
+                tools_info.append({
+                    "name": name,
+                    "title": getattr(t, "title", "") or "",
+                    "summary": (desc[0] if desc else "")[:300],
+                })
+    except Exception:  # pylint: disable=broad-except
+        tools_info = []
+    if not tools_info:
+        tools_info = [
+            {"name": "execute_kql_query",
+             "title": "Execute KQL Query (Azure Data Explorer / Kusto)",
+             "summary": "Run KQL on Kusto and return results. Supports NL2KQL via generate_query=true."},
+            {"name": "kql_schema_memory",
+             "title": "KQL Schema Memory & Discovery (Kusto)",
+             "summary": "Discover, cache and explore Kusto schema. Operations: list_tables, discover, get_context, refresh_schema, get_stats, clear_cache, generate_report, cache_stats, cleanup_cache, list_multi_cluster_tables."},
+        ]
+
+    config = {
+        "server_name": C.SERVER_NAME,
+        "server_version": get_current_version(),
+        "mcp_protocol_version": C.MCP_PROTOCOL_VERSION,
+        "transport": "stdio (FastMCP)",
+        "auth": "Azure CLI (az login). No secrets stored.",
+        "memory_path": C.DEFAULT_MEMORY_PATH,
+        "default_kusto_domain": C.DEFAULT_KUSTO_DOMAIN,
+        "connection_timeout_sec": C.DEFAULT_CONNECTION_TIMEOUT,
+        "query_timeout_sec": C.DEFAULT_QUERY_TIMEOUT,
+        "kusto_max_query_timeout_sec": C.KUSTO_MAX_QUERY_TIMEOUT_SECONDS,
+        "kusto_min_query_timeout_sec": C.KUSTO_MIN_QUERY_TIMEOUT_SECONDS,
+        "schema_cache_max_age_days": C.SCHEMA_CACHE_MAX_AGE_DAYS,
+        "max_tables_per_database": C.MAX_TABLES_PER_DATABASE,
+        "max_columns_per_table": C.MAX_COLUMNS_PER_TABLE,
+        "max_query_length": C.MAX_QUERY_LENGTH,
+        "min_query_length": C.MIN_QUERY_LENGTH,
+    }
+
+    if as_json:
+        print(json.dumps({"config": config, "tools": tools_info}, indent=2))
+        return
+
+    print("=" * 72)
+    print(f"  {config['server_name']}")
+    print("=" * 72)
+    print("\nConfiguration:")
+    width = max(len(k) for k in config) + 2
+    for k, v in config.items():
+        print(f"  {k.ljust(width)} : {v}")
+
+    print(f"\nRegistered MCP Tools ({len(tools_info)}):")
+    for t in tools_info:
+        print(f"  - {t['name']}")
+        if t.get("title"):
+            print(f"      title  : {t['title']}")
+        if t.get("summary"):
+            print(f"      summary: {t['summary']}")
+
+    print("\nUsage:")
+    print("  mcp-kql-server                 Start the MCP server (stdio transport)")
+    print("  mcp-kql-server --info          Show this configuration and tool list")
+    print("  mcp-kql-server --info --json   Same as --info, machine-readable JSON")
+    print("  mcp-kql-server --version       Print server version and exit")
+    print("  mcp-kql-server --help          Show CLI help")
+    print()
+
+
 def main():
-    """Start the simplified MCP KQL server with version checking."""
+    """Start the simplified MCP KQL server with version checking.
+
+    Supports a small CLI surface (``--help``, ``--version``, ``--info``)
+    so operators can introspect the server before wiring it into a host.
+    """
+    import argparse
+
+    from .version_checker import get_current_version
+
+    parser = argparse.ArgumentParser(
+        prog="mcp-kql-server",
+        description=(
+            "AI-Powered MCP server for KQL query execution against Azure Data "
+            "Explorer / Kusto with schema memory and NL2KQL. "
+            "With no flags, starts the MCP server over stdio."
+        ),
+    )
+    parser.add_argument(
+        "--version", action="version",
+        version=f"mcp-kql-server {get_current_version()}",
+    )
+    parser.add_argument(
+        "--info", action="store_true",
+        help="Print server configuration and registered tool list, then exit.",
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="With --info, emit machine-readable JSON instead of text.",
+    )
+
+    args = parser.parse_args()
+
     global kusto_manager_global  # pylint: disable=global-statement
 
-    # Import version checker
-    from .version_checker import startup_version_check, get_current_version
+    if args.info:
+        _print_info(as_json=args.json)
+        return
+
+    from .version_checker import startup_version_check
 
     # Clean startup banner (no Unicode characters)
     logger.info("=" * 60)
