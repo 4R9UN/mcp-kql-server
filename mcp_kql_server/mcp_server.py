@@ -25,19 +25,77 @@ os.environ["NO_COLOR"] = "1"
 from fastmcp import FastMCP # pylint: disable=wrong-import-position
 
 from .constants import (
-    SERVER_NAME
+    SERVER_NAME,
+    __version__,
 )
-from .execute_kql import kql_execute_tool
+from .execute_kql import (
+    kql_execute_tool,
+    dry_run_query,
+    classify_kusto_error,
+    ERROR_CLASS_SCHEMA_DRIFT,
+)
 from .memory import get_memory_manager
 from .utils import (
-    bracket_if_needed, SchemaManager, ErrorHandler
+    bracket_if_needed, SchemaManager, ErrorHandler,
+    extract_cluster_and_database_from_query,
 )
 from .kql_auth import authenticate_kusto
 from .kql_validator import KQLValidator
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(name=SERVER_NAME)
+# Server-level instructions surfaced to MCP clients (Claude, VS Code, Cursor, ...)
+# in their tool-discovery UI. Keep concise and action-oriented; LLMs use this to
+# decide WHEN to reach for this server.
+_SERVER_INSTRUCTIONS = (
+    "Run KQL queries against Azure Data Explorer (Kusto) clusters and convert "
+    "natural-language questions into validated KQL. Use this server whenever the "
+    "user asks about data in Kusto, Azure Monitor, Microsoft Sentinel, Defender "
+    "XDR Advanced Hunting, or any '*.kusto.windows.net' cluster. "
+    "Authentication is via Azure CLI (`az login`); no secrets are stored. "
+    "Workflow: (1) call `kql_schema_memory` with operation='list_tables' to see "
+    "what exists, (2) call it with operation='discover' to cache a table schema, "
+    "(3) call `execute_kql_query` to run KQL, optionally with generate_query=true "
+    "to convert natural language to KQL grounded in the cached schema."
+)
+
+mcp = FastMCP(
+    name=SERVER_NAME,
+    version=__version__,
+    instructions=_SERVER_INSTRUCTIONS,
+)
+
+
+def _operation_example(operation: str) -> Dict[str, Any]:
+    """Return a minimal, copy-pasteable example call payload for an operation.
+
+    Helps the LLM self-correct when it misses required arguments.
+    """
+    examples: Dict[str, Dict[str, Any]] = {
+        "list_tables": {
+            "operation": "list_tables",
+            "cluster_url": "https://help.kusto.windows.net",
+            "database": "Samples",
+        },
+        "discover": {
+            "operation": "discover",
+            "cluster_url": "https://help.kusto.windows.net",
+            "database": "Samples",
+            "table_name": "StormEvents",
+        },
+        "get_context": {
+            "operation": "get_context",
+            "cluster_url": "https://help.kusto.windows.net",
+            "database": "Samples",
+            "natural_language_query": "top storm events by damage",
+        },
+        "refresh_schema": {
+            "operation": "refresh_schema",
+            "cluster_url": "https://help.kusto.windows.net",
+            "database": "Samples",
+        },
+    }
+    return examples.get(operation, {"operation": operation})
 
 # Global manager instances
 memory_manager = get_memory_manager()
@@ -83,19 +141,29 @@ def _extract_column_suggestions(error_message: str) -> List[str]:
 
 
 def _choose_preferred_time_column(schema_columns: Dict[str, Any]) -> Optional[str]:
-    """Pick the best canonical time column from a schema."""
-    preferred_names = [
-        "TimeGenerated", "Timestamp", "ReportTime", "EventTime",
-        "FirstSeenDateTime", "LastSeenDateTime", "CreatedOn",
-    ]
-    for name in preferred_names:
-        if name in schema_columns:
-            return name
+    """Pick the best time column from a schema, schema-driven only.
 
+    No table or column names are hardcoded. Selection prefers a datetime
+    typed column whose name contains a time-related token, then any datetime
+    column, then any column whose name carries a time-related token.
+    """
+    time_tokens = {"time", "date", "timestamp"}
+    datetime_columns: List[str] = []
+    name_match_columns: List[str] = []
     for column_name, column_def in schema_columns.items():
         data_type = column_def.get("data_type") if isinstance(column_def, dict) else column_def
-        if str(data_type).lower() == "datetime":
+        is_datetime = str(data_type).lower() == "datetime"
+        has_time_token = bool(time_tokens & set(_tokenize_identifier(column_name)))
+        if is_datetime and has_time_token:
             return column_name
+        if is_datetime:
+            datetime_columns.append(column_name)
+        elif has_time_token:
+            name_match_columns.append(column_name)
+    if datetime_columns:
+        return datetime_columns[0]
+    if name_match_columns:
+        return name_match_columns[0]
     return None
 
 
@@ -123,17 +191,12 @@ def _choose_schema_replacement(
         score = 0.0
         score += len(invalid_tokens & column_tokens) * 2.5
         score += 1.5 * difflib.SequenceMatcher(None, invalid_lower, column_name.lower()).ratio()
-
-        if "command" in invalid_lower and "command" in column_name.lower():
-            score += 2.0
-        if "account" in invalid_lower and "account" in column_name.lower():
-            score += 2.0
-        if "parent" in invalid_lower and "parent" in column_name.lower():
-            score += 2.0
-        if "file" in invalid_lower and "file" in column_name.lower():
-            score += 2.0
-        if "path" in invalid_lower and "path" in column_name.lower():
-            score += 2.0
+        # Generic token-overlap boost (no hardcoded column names): reward when both
+        # the invalid identifier and a candidate share any non-trivial token besides
+        # the time-class tokens already handled above.
+        shared_meaningful = (invalid_tokens & column_tokens) - {"time", "date", "timestamp", "id"}
+        if shared_meaningful:
+            score += min(len(shared_meaningful), 3) * 0.6
 
         ranked_candidates.append((score, column_name))
 
@@ -502,8 +565,16 @@ async def _validate_candidate_query(
     candidate: Dict[str, Any],
     cluster_url: str,
     database: str,
+    *,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Validate a generated candidate against cached schema."""
+    """Validate a generated candidate against cached schema and (optionally) ADX.
+
+    When ``dry_run`` is True the candidate is also wrapped as ``| take 0`` and
+    sent to ADX so the engine itself confirms the query binds against the live
+    schema. The dry-run is the cheapest way to catch schema drift that the
+    cached schema validator missed and never returns rows.
+    """
     validation = await kql_validator.validate_query(
         query=candidate["query"],
         cluster=cluster_url,
@@ -511,10 +582,24 @@ async def _validate_candidate_query(
         auto_discover=False,
     )
     validated_candidate = {**candidate, "validation": validation}
+    score = candidate["score"]
     if validation.get("valid"):
-        validated_candidate["score"] = round(candidate["score"] + 5.0, 4)
+        score += 5.0
+        if dry_run:
+            try:
+                dry = await dry_run_query(candidate["query"], cluster_url, database)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug("dry-run helper raised: %s", exc)
+                dry = {"valid": False, "executable": False, "error": str(exc), "error_class": None}
+            validated_candidate["dry_run"] = dry
+            if dry.get("executable"):
+                score += 4.0
+            else:
+                # ADX rejected; downgrade so we prefer a candidate that actually binds.
+                score -= 6.0
     else:
-        validated_candidate["score"] = round(candidate["score"] - len(validation.get("errors", [])) * 2.0, 4)
+        score -= len(validation.get("errors", [])) * 2.0
+    validated_candidate["score"] = round(score, 4)
     return validated_candidate
 
 
@@ -540,46 +625,72 @@ def _build_safe_repair_query(
     }
 
 
-@mcp.tool()
+@mcp.tool(
+    name="execute_kql_query",
+    title="Execute KQL Query (Azure Data Explorer / Kusto)",
+    annotations={
+        # Direct queries are read-only; .ingest/.drop management commands are rare
+        # and gated by Azure RBAC, so the tool is read-only by default for the LLM.
+        "readOnlyHint": True,
+        # Talks to remote ADX clusters, results may differ between calls.
+        "openWorldHint": True,
+        "idempotentHint": True,
+        "destructiveHint": False,
+    },
+)
 async def execute_kql_query(
     query: str,
-    cluster_url: str,
-    database: str,
-    auth_method: str = "device",
+    cluster_url: Optional[str] = None,
+    database: Optional[str] = None,
     output_format: str = "json",
     generate_query: bool = False,
     table_name: Optional[str] = None,
-    use_live_schema: bool = True
+    use_live_schema: bool = True,
+    visualize: Optional[bool] = None,  # accepted for LLM compat; not used
 ) -> str:
-    """
-    Execute a KQL query against Azure Data Explorer (Kusto) cluster.
-    
-    This tool connects to an Azure Data Explorer cluster and executes KQL queries.
-    It supports direct query execution OR natural language to KQL conversion.
-    
-    AUTHENTICATION: Uses Azure CLI authentication. Run 'az login' before using.
-    
-    USAGE PATTERNS:
-    1. Direct KQL: Set query="Your KQL query", generate_query=False
-    2. Natural Language: Set query="Find top 10 users", generate_query=True
-    
-    IMPORTANT:
-    - Always run 'schema_memory' with 'list_tables' first to discover available tables
-    - Use 'schema_memory' with 'discover' to cache table schemas before querying
-    - The tool validates queries against cached schema to prevent errors
+    """Run KQL on Azure Data Explorer (Kusto) and return results.
+
+    Use this tool ANY time the user asks a question that needs data from a
+    Kusto cluster (Azure Data Explorer, Azure Monitor Logs, Microsoft Sentinel,
+    Defender XDR Advanced Hunting, or any `*.kusto.windows.net` endpoint).
+
+    Two modes:
+      * Direct KQL: pass a real KQL query, leave `generate_query=false`.
+      * Natural language to KQL: pass an English question and set
+        `generate_query=true`. The query is grounded against the cached schema,
+        validated, dry-run against ADX (`| take 0`), and self-repaired once on
+        schema drift before execution.
+
+    Tips for the model:
+      * If the user already gave you a query in `cluster('x').database('y').T`
+        form, you can omit `cluster_url` and `database`; they will be parsed
+        from the query.
+      * For NL2KQL, call `kql_schema_memory` (operation=`list_tables` then
+        `discover`) FIRST so the generator has accurate table/column context.
+      * Default output is compact JSON. Use `output_format="csv"` for export
+        and `"table"` for human-readable preview.
 
     Args:
-        query: KQL query to execute, or natural language description if generate_query=True.
-        cluster_url: Kusto cluster URL (e.g., 'https://cluster.region.kusto.windows.net').
-        database: Database name to query.
-        auth_method: Authentication method (ignored - always uses Azure CLI via 'az login').
-        output_format: Output format - 'json' (default), 'csv', or 'table'.
-        generate_query: If True, converts natural language 'query' to KQL before execution.
-        table_name: Target table for query generation (helps NL2KQL find correct table).
-        use_live_schema: Use live schema discovery for query generation (default: True).
+        query: KQL query, or a natural-language description if
+            `generate_query=true`.
+        cluster_url: Kusto cluster URL, e.g.
+            `https://help.kusto.windows.net`. Optional if the query already
+            embeds `cluster(...).database(...)`.
+        database: Database name. Optional if the query already embeds it.
+        output_format: One of `json` (default), `csv`, `table`,
+            `generation_only`.
+        generate_query: If true, treat `query` as natural language and convert
+            to KQL before execution.
+        table_name: Optional hint for NL2KQL to bias generation toward a
+            specific table.
+        use_live_schema: When true (default) refresh the table schema from
+            ADX before generation if the cache is stale.
 
     Returns:
-        JSON string with query results or generated query.
+        JSON string. On success contains `data`, `columns`, `row_count`. On
+        failure contains `error`, `error_class`, and recovery `suggestions`.
+    Authentication: Requires `az login` first; tokens are never stored.
+    Hard server-side timeout per query: 10 minutes (ADX `servertimeout`).
     """
     try:
         repaired_query_info = None
@@ -590,9 +701,30 @@ async def execute_kql_query(
                 "suggestions": ["Run 'az login' to authenticate"]
             })
 
-        # Track auth method
-        requested_auth_method = auth_method or "device"
-        active_auth_method = kusto_manager_global.get("auth_method") if isinstance(kusto_manager_global, dict) else None
+        # If caller did not pass cluster/database, try to recover them from any
+        # `cluster('x').database('y').Table` prefix already in the query text.
+        # This avoids forcing the LLM to repeat values it already typed.
+        if not cluster_url or not database:
+            try:
+                extracted_cluster, extracted_database = extract_cluster_and_database_from_query(query)
+                cluster_url = cluster_url or extracted_cluster
+                database = database or extracted_database
+            except (ValueError, TypeError, AttributeError):
+                pass
+        if not cluster_url or not database:
+            return json.dumps({
+                "success": False,
+                "error": "cluster_url and database are required (or embed cluster('x').database('y').Table in the query).",
+                "suggestions": [
+                    "Pass cluster_url and database explicitly, or use a query that starts with cluster('...').database('...').TableName",
+                ],
+            })
+
+        # Track auth method for response transparency.
+        active_auth_method = (
+            kusto_manager_global.get("auth_method") if isinstance(kusto_manager_global, dict) else None
+        )
+        requested_auth_method = active_auth_method or "azure-cli"
 
         # Generate KQL query if requested
         if generate_query:
@@ -687,53 +819,96 @@ async def execute_kql_query(
         logger.info("Query validated successfully. Tables: %s, Columns: %s", validation_result['tables_used'], validation_result['columns_validated'])
 
         # Execute query with proper exception handling
+        df = None  # ensures `df` is bound for downstream type-checkers
         try:
             df = kql_execute_tool(kql_query=query, cluster_uri=cluster_url, database=database)
         except Exception as exec_error:
-            logger.error("Query execution error: %s", exec_error)
-            error_str = str(exec_error).lower()
-            
-            # Generate context-aware suggestions based on error type
-            suggestions = []
-            
-            # Database not found error
-            if "database" in error_str and ("not found" in error_str or "kind" in error_str):
-                suggestions.extend([
-                    f"Database '{database}' was not found on cluster '{cluster_url}'",
-                    "Run: schema_memory(operation='list_tables', cluster_url='<cluster>', database='<correct_db>')",
-                    "Use '.show databases' command to list available databases",
-                    "Common database names: scrubbeddata, Geneva, Samples"
-                ])
-            # Table/Column not found errors (SEM0100)
-            elif "sem0100" in error_str or "failed to resolve" in error_str:
-                suggestions.extend([
-                    "One or more column names don't exist in the table schema",
-                    "Run schema_memory(operation='discover', table_name='<table>') to refresh schema",
-                    "Check column names using: TableName | getschema"
-                ])
-            # Unknown table errors
-            elif "unknown" in error_str and "table" in error_str:
-                suggestions.extend([
-                    "Table name may be incorrect",
-                    "Run: schema_memory(operation='list_tables') to see available tables",
-                    "Check if you need to use bracket notation: ['TableName']"
-                ])
-            else:
-                suggestions.extend([
-                    "Check your query syntax",
-                    "Verify cluster and database are correct",
-                    "Ensure table names exist in the database"
-                ])
-            
-            result = {
-                "success": False,
-                "error": str(exec_error),
-                "query": query[:200] + "..." if len(query) > 200 else query,
-                "suggestions": suggestions,
-                "requested_auth_method": requested_auth_method,
-                "active_auth_method": active_auth_method
-            }
-            return json.dumps(result, indent=2)
+            error_str_raw = str(exec_error)
+            error_class = classify_kusto_error(error_str_raw)
+            # ----------------------------------------------------------------
+            # One-shot validation feedback loop:
+            # If ADX rejects with schema drift (SEM0100 / "failed to resolve"),
+            # refresh the involved tables, re-validate, attempt a schema-grounded
+            # repair, then retry exactly ONCE. No infinite loops.
+            # ----------------------------------------------------------------
+            if error_class == ERROR_CLASS_SCHEMA_DRIFT and not generate_query:
+                try:
+                    from .execute_kql import _ensure_schema_discovered  # local import
+                    refresh_tables = list(validation_result.get("tables_used") or [])
+                    if refresh_tables:
+                        await _ensure_schema_discovered(cluster_url, database, refresh_tables)
+                    revalidation = await kql_validator.validate_query(
+                        query=query,
+                        cluster=cluster_url,
+                        database=database,
+                        auto_discover=False,
+                    )
+                    repaired = await _repair_query_with_schema_context(
+                        query, cluster_url, database, revalidation
+                    )
+                    if repaired and repaired.get("query"):
+                        logger.info(
+                            "Retrying once after schema-drift repair: %s -> %s",
+                            list(repaired["replacements"].keys()),
+                            list(repaired["replacements"].values()),
+                        )
+                        try:
+                            df = kql_execute_tool(
+                                kql_query=repaired["query"],
+                                cluster_uri=cluster_url,
+                                database=database,
+                            )
+                            query = repaired["query"]
+                            repair_metadata = repaired
+                            exec_error = None  # type: ignore[assignment]
+                        except Exception as retry_err:  # pylint: disable=broad-except
+                            logger.warning("Schema-drift retry failed: %s", retry_err)
+                            exec_error = retry_err
+                except Exception as feedback_err:  # pylint: disable=broad-except
+                    logger.debug("Schema-drift feedback loop failed: %s", feedback_err)
+            if exec_error is not None:
+                logger.error("Query execution error (class=%s): %s", error_class, exec_error)
+                error_str = error_str_raw.lower()
+                # Generate context-aware suggestions based on error type
+                suggestions = []
+                # Database not found error
+                if "database" in error_str and ("not found" in error_str or "kind" in error_str):
+                    suggestions.extend([
+                        f"Database '{database}' was not found on cluster '{cluster_url}'",
+                        "Run schema_memory(operation='list_tables', cluster_url=<cluster>, database=<db>) to confirm the database name",
+                        "Use '.show databases' as a KQL query to list available databases on the cluster",
+                    ])
+                # Table/Column not found errors (SEM0100)
+                elif "sem0100" in error_str or "failed to resolve" in error_str:
+                    suggestions.extend([
+                        "One or more column names don't exist in the table schema",
+                        "Run schema_memory(operation='discover', table_name='<table>') to refresh schema",
+                        "Check column names using: TableName | getschema"
+                    ])
+                # Unknown table errors
+                elif "unknown" in error_str and "table" in error_str:
+                    suggestions.extend([
+                        "Table name may be incorrect",
+                        "Run: schema_memory(operation='list_tables') to see available tables",
+                        "Check if you need to use bracket notation: ['TableName']"
+                    ])
+                else:
+                    suggestions.extend([
+                        "Check your query syntax",
+                        "Verify cluster and database are correct",
+                        "Ensure table names exist in the database"
+                    ])
+
+                result = {
+                    "success": False,
+                    "error": str(exec_error),
+                    "error_class": error_class,
+                    "query": query[:200] + "..." if len(query) > 200 else query,
+                    "suggestions": suggestions,
+                    "requested_auth_method": requested_auth_method,
+                    "active_auth_method": active_auth_method
+                }
+                return json.dumps(result, indent=2)
 
         if df is None or df.empty:
             logger.info("Query returned empty result (no rows) for: %s...", query[:100])
@@ -957,6 +1132,41 @@ async def _generate_kql_from_natural_language(
             validated_candidates[0] if validated_candidates else None,
         )
 
+        # Live-engine confirmation: dry-run only the schema-validated leader so we
+        # spend at most ONE additional ADX call per generation. Catches schema
+        # drift that the cached validator missed.
+        if best_candidate and best_candidate["validation"].get("valid"):
+            try:
+                dry = await dry_run_query(best_candidate["query"], cluster_url, database)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug("dry-run on best candidate raised: %s", exc)
+                dry = {"executable": True, "skipped": True, "error": str(exc), "error_class": None}
+            best_candidate["dry_run"] = dry
+            if not dry.get("executable") and not dry.get("skipped"):
+                # Force a schema refresh on involved tables and try the safe-repair fallback.
+                if dry.get("error_class") == ERROR_CLASS_SCHEMA_DRIFT:
+                    try:
+                        from .execute_kql import _ensure_schema_discovered  # local import
+                        await _ensure_schema_discovered(
+                            cluster_url, database, [best_candidate.get("table")]
+                        )
+                    except Exception as refresh_err:  # pylint: disable=broad-except
+                        logger.debug("post-dry-run schema refresh failed: %s", refresh_err)
+                logger.info(
+                    "Best candidate failed live dry-run (class=%s); attempting safe-repair fallback",
+                    dry.get("error_class"),
+                )
+                repair_candidate = _build_safe_repair_query(candidate_tables[0], intent)
+                repair_candidate["table"] = candidate_tables[0]["table"]
+                repair_candidate = await _validate_candidate_query(
+                    repair_candidate, cluster_url, database, dry_run=True
+                )
+                if (
+                    repair_candidate["validation"].get("valid")
+                    and repair_candidate.get("dry_run", {}).get("executable", True)
+                ):
+                    best_candidate = repair_candidate
+
         if not best_candidate:
             return {
                 "success": False,
@@ -1061,7 +1271,16 @@ async def _generate_kql_from_natural_language(
         return {"success": False, "error": str(e), "query": ""}
 
 
-@mcp.tool()
+@mcp.tool(
+    name="kql_schema_memory",
+    title="KQL Schema Memory & Discovery (Kusto)",
+    annotations={
+        "readOnlyHint": True,
+        "openWorldHint": True,
+        "idempotentHint": True,
+        "destructiveHint": False,
+    },
+)
 async def schema_memory(
     operation: str,
     cluster_url: Optional[str] = None,
@@ -1069,44 +1288,39 @@ async def schema_memory(
     table_name: Optional[str] = None,
     natural_language_query: Optional[str] = None,
     session_id: str = "default",
-    include_visualizations: bool = True
+    include_visualizations: bool = True,
 ) -> str:
-    """
-    Comprehensive schema memory and analysis operations.
-    
-    This tool manages schema discovery, caching, and AI context for Azure Data Explorer.
-    Use this tool BEFORE executing queries to understand available data structures.
-    
-    AUTHENTICATION: Uses Azure CLI authentication. Run 'az login' before using.
-    
-    RECOMMENDED WORKFLOW:
-    1. First: operation="list_tables" - See all tables in database
-    2. Then: operation="discover" - Cache schema for specific table
-    3. Finally: Use 'execute_kql_query' with cached schema knowledge
+    """Discover, cache and explore KQL/Kusto schema metadata.
 
-    Operations:
-    - "list_tables": List all tables in a database (START HERE)
-    - "discover": Discover and cache schema for a specific table
-    - "get_context": Get AI context for tables based on natural language query
-    - "refresh_schema": Proactively refresh all schemas for a database
-    - "get_stats": Get memory and cache statistics
-    - "clear_cache": Clear all cached schemas
-    - "generate_report": Generate analysis report with visualizations
-    - "cache_stats": Get detailed query cache statistics (NEW)
-    - "cleanup_cache": Remove expired cache entries (NEW)
-    - "list_multi_cluster_tables": List tables found in multiple clusters (NEW)
+    Always reach for this tool BEFORE writing or generating KQL against an
+    unfamiliar cluster or database. It builds the schema memory that
+    `execute_kql_query` uses for validation and NL2KQL grounding.
+
+    Operations (pass via `operation`):
+      * `list_tables` (start here) - list every table in `database`.
+      * `discover` - fetch and cache full schema for one `table_name`.
+      * `get_context` - rank tables/columns relevant to a `natural_language_query`.
+      * `refresh_schema` - force-refresh all cached schemas for a database.
+      * `get_stats` - memory-DB stats.
+      * `clear_cache` - clear cached schemas.
+      * `generate_report` - HTML report (uses `session_id`,
+        `include_visualizations`).
+      * `cache_stats` / `cleanup_cache` - inspect or evict the query-result cache.
+      * `list_multi_cluster_tables` - tables observed in multiple clusters.
 
     Args:
-        operation: The operation to perform (see list above)
-        cluster_url: Kusto cluster URL (e.g., 'https://cluster.region.kusto.windows.net')
-        database: Database name
-        table_name: Table name (required for 'discover' operation)
-        natural_language_query: Natural language query (for 'get_context' operation)
-        session_id: Session ID for report generation
-        include_visualizations: Include visualizations in reports
+        operation: One of the operations above.
+        cluster_url: Kusto cluster URL. Required for cluster-scoped operations.
+        database: Database name. Required for cluster-scoped operations.
+        table_name: Required for `discover`; optional hint for `get_context`.
+        natural_language_query: Required for `get_context`.
+        session_id: Optional report grouping id.
+        include_visualizations: Include charts in `generate_report`.
 
     Returns:
-        JSON string with operation results
+        JSON string with operation-specific payload, plus `success` and
+        `suggestions` on failure.
+    Authentication: Requires `az login` first.
     """
     try:
         if not kusto_manager_global or not kusto_manager_global.get("authenticated"):
@@ -1120,27 +1334,53 @@ async def schema_memory(
                 ]
             })
 
+        # Normalize cluster_url so callers can pass either bare hostname
+        # ("c.kusto.windows.net") or full URL ("https://c.kusto.windows.net").
+        # This avoids one of the most common LLM tool-call mistakes.
+        if cluster_url:
+            try:
+                from .utils import normalize_cluster_uri
+                cluster_url = normalize_cluster_uri(cluster_url)
+            except (ValueError, TypeError):
+                pass
+
+        # Build a single, action-oriented missing-arg error message that
+        # tells the LLM exactly which fields are missing for THIS operation.
+        def _missing(*required: str) -> Optional[str]:
+            local = {"cluster_url": cluster_url, "database": database,
+                     "table_name": table_name, "natural_language_query": natural_language_query}
+            missing = [name for name in required if not local.get(name)]
+            if not missing:
+                return None
+            return json.dumps({
+                "success": False,
+                "error": f"Missing required argument(s) for operation '{operation}': {', '.join(missing)}",
+                "operation": operation,
+                "required": list(required),
+                "missing": missing,
+                "example": _operation_example(operation),
+                "suggestions": [
+                    f"Provide '{m}' in the next call." for m in missing
+                ],
+            }, indent=2)
+
         if operation == "discover":
-            # Validate required parameters
-            if not cluster_url or not database or not table_name:
-                return json.dumps({
-                    "success": False,
-                    "error": "cluster_url, database, and table_name are required for discover operation"
-                })
+            err = _missing("cluster_url", "database", "table_name")
+            if err:
+                return err
+            assert cluster_url and database and table_name  # narrowed by _missing
             return await _schema_discover_operation(cluster_url, database, table_name)
         elif operation == "list_tables":
-            if not cluster_url or not database:
-                return json.dumps({
-                    "success": False,
-                    "error": "cluster_url and database are required for list_tables operation"
-                })
+            err = _missing("cluster_url", "database")
+            if err:
+                return err
+            assert cluster_url and database
             return await _schema_list_tables_operation(cluster_url, database)
         elif operation == "get_context":
-            if not cluster_url or not database or not natural_language_query:
-                return json.dumps({
-                    "success": False,
-                    "error": "cluster_url, database, and natural_language_query are required for get_context operation"
-                })
+            err = _missing("cluster_url", "database", "natural_language_query")
+            if err:
+                return err
+            assert cluster_url and database and natural_language_query
             return await _schema_get_context_operation(cluster_url, database, natural_language_query, table_name)
         elif operation == "generate_report":
             return await _schema_generate_report_operation(session_id, include_visualizations)
@@ -1149,11 +1389,10 @@ async def schema_memory(
         elif operation == "get_stats":
             return await _schema_get_stats_operation()
         elif operation == "refresh_schema":
-            if not cluster_url or not database:
-                return json.dumps({
-                    "success": False,
-                    "error": "cluster_url and database are required for refresh_schema operation"
-                })
+            err = _missing("cluster_url", "database")
+            if err:
+                return err
+            assert cluster_url and database
             return await _schema_refresh_operation(cluster_url, database)
         elif operation == "cache_stats":
             return await _schema_cache_stats_operation()
@@ -1166,7 +1405,7 @@ async def schema_memory(
                 "success": False,
                 "error": f"Unknown operation: {operation}",
                 "available_operations": [
-                    "discover", "list_tables", "get_context", "generate_report", 
+                    "discover", "list_tables", "get_context", "generate_report",
                     "clear_cache", "get_stats", "refresh_schema",
                     "cache_stats", "cleanup_cache", "list_multi_cluster_tables"
                 ]

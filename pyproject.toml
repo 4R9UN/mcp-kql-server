@@ -1,6 +1,6 @@
 [project]
 name = "mcp-kql-server"
-version = "2.1.1"
+version = "2.1.2"
 description = "AI-Powered MCP server for KQL query execution with Natural Language to KQL (NL2KQL) conversion, intelligent schema memory, RAG-enhanced context assistance, and semantic search capabilities"
 authors = [{ name = "Arjun Trivedi", email = "arjuntrivedi42@yahoo.com" }]
 readme = "README.md"
@@ -26,6 +26,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -36,7 +37,7 @@ dependencies = [
     "pydantic>=2.0.0,<3.0.0",
     "typing-extensions>=4.0.0,<5.0.0",
     "tabulate>=0.9.0,<1.0.0",
-    "fastmcp>=2.10.0,<3.0.0",
+    "fastmcp>=2.14.7,<3.0.0",
     "azure-kusto-data>=4.0.0,<6.0.0",
     "azure-identity>=1.15.0,<2.0.0",
     "authlib>=1.3.0,<2.0.0",

@@ -20,7 +20,7 @@ from .mcp_server import main
 from .version_checker import check_for_updates, get_current_version
 
 # Version information
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 __author__ = "Arjun Trivedi"
 __email__ = "arjuntrivedi42@yahoo.com"
 

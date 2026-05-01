@@ -16,13 +16,13 @@ def test_package_imports():
     """Test that package imports work correctly."""
     assert hasattr(mcp_kql_server, "__version__")
     assert hasattr(mcp_kql_server, "__author__")
-    assert mcp_kql_server.__version__ == "2.1.1"
+    assert mcp_kql_server.__version__ == "2.1.2"
     assert mcp_kql_server.__author__ == "Arjun Trivedi"
 
 
 def test_version_consistency():
     """Test that version is consistent across modules."""
-    assert pkg_version == const_version == "2.1.1"
+    assert pkg_version == const_version == "2.1.2"
 
 
 def test_author_attribution():

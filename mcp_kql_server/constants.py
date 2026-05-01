@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 
 # Version information - Single source of truth from pyproject.toml
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 VERSION = __version__
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
@@ -148,6 +148,12 @@ DEFAULT_KUSTO_DOMAIN = "kusto.windows.net"
 SYSTEM_DATABASES = {"$systemdb"}
 DEFAULT_CONNECTION_TIMEOUT = 60
 DEFAULT_QUERY_TIMEOUT = 600
+# Hard server-side ceiling for any single Kusto query, in seconds.
+# Sent to ADX via ClientRequestProperties.servertimeout.
+# 10 minutes is the deliberate upper bound for this MCP server.
+KUSTO_MAX_QUERY_TIMEOUT_SECONDS = 600
+# Floor that prevents accidental sub-second misconfigurations.
+KUSTO_MIN_QUERY_TIMEOUT_SECONDS = 5
 
 # Schema memory configuration
 SCHEMA_CACHE_MAX_AGE_DAYS = 7

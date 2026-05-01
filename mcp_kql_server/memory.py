@@ -631,7 +631,10 @@ class MemoryManager:
             if aggregate_intent and data_type in {"string", "guid"}:
                 score += 1.0
 
-            if column_name.lower() in {"timegenerated", "timestamp", "reporttime"}:
+            # Schema-driven canonical-time boost (no hardcoded names).
+            # A column qualifies as canonical-time when its name carries any
+            # time token AND its declared data type is datetime.
+            if data_type == "datetime" and {"time", "date", "timestamp"} & column_tokens:
                 score += 1.5
 
             ranked_columns.append({
@@ -701,6 +704,36 @@ class MemoryManager:
             })
 
         join_hints = self.get_join_hints([table["table"] for table in ranked_tables]) if ranked_tables else []
+
+        # Build a quick lookup of join keys (column names that appear in any
+        # join hint touching this table). Schema-driven: we only retain names
+        # that exist in the table's column dict, so no hardcoded keys leak in.
+        def _extract_join_keys(table_name: str, columns: Dict[str, Any]) -> List[str]:
+            keys: List[str] = []
+            tname_lower = table_name.lower()
+            for hint in join_hints or []:
+                hint_text = hint if isinstance(hint, str) else str(hint.get("hint", ""))
+                if tname_lower not in hint_text.lower():
+                    continue
+                # token extraction: any identifier in the hint that matches a real column
+                for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", hint_text):
+                    if token in columns and token not in keys:
+                        keys.append(token)
+            return keys[:6]
+
+        # Decorate each enriched table with schema-driven hints so downstream
+        # generators (heuristic OR future LLM) get the same compact context.
+        for table_info in enriched_tables:
+            cols = table_info.get("columns") or {}
+            time_col = None
+            for col_name, col_def in cols.items():
+                dtype = col_def.get("data_type") if isinstance(col_def, dict) else col_def
+                if str(dtype).lower() == "datetime":
+                    time_col = col_name
+                    break
+            table_info["time_column"] = time_col
+            table_info["join_keys"] = _extract_join_keys(table_info["table"], cols)
+
         return {
             "tables": enriched_tables,
             "similar_queries": similar_queries,

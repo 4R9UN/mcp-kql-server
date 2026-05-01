@@ -16,7 +16,7 @@ from mcp_kql_server.constants import (
 
 def test_version_constants():
     """Test version constants are properly defined."""
-    assert __version__ == "2.1.1"
+    assert __version__ == "2.1.2"
 
 
 def test_server_constants():

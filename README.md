@@ -8,7 +8,7 @@ mcp-name: io.github.4R9UN/mcp-kql-server
 
 A Model Context Protocol (MCP) server that transforms natural language questions into optimized KQL queries with intelligent schema discovery, AI-powered caching, and seamless Azure Data Explorer integration. Simply ask questions in plain English and get instant, accurate KQL queries with context-aware results.
 
-**Latest Version: v2.1.1** - Now with stricter schema-grounded CAG, safer cache scoping, and runtime repair for invalid columns.
+**Latest Version: v2.1.2** - Hardcoded 10-minute Kusto `servertimeout`, ADX-side dry-run validation for generated queries, schema-drift recovery loop, and fully schema-driven NL2KQL with no hardcoded table or column names.
 
 <!-- Badges Section -->
 
@@ -34,6 +34,16 @@ A Model Context Protocol (MCP) server that transforms natural language questions
 Watch a quick demo of the MCP KQL Server in action:
 
 [![MCP KQL Server Demo](https://img.youtube.com/vi/Ca-yuThJ3Vc/0.jpg)](https://www.youtube.com/watch?v=Ca-yuThJ3Vc)
+
+## 🆕 What's New in v2.1.2
+
+- **⏱️ Hardcoded 10-min Query Timeout**: Every Kusto call now ships `ClientRequestProperties.servertimeout` (capped at 600s). Long queries no longer silently die at the ADX default of ~4 minutes.
+- **🔍 ADX-Side Dry-Run Validation**: NL2KQL leader candidates are wrapped as `<query> | take 0` and bound by ADX itself. Catches schema drift the cached validator misses, costs zero rows.
+- **🔁 Schema-Drift Recovery Loop**: On `SEM0100` / "failed to resolve" failures the server refreshes the schema, repairs the query against real columns, and retries exactly once. No infinite loops.
+- **🧭 Smarter Retry Policy**: Server-side timeouts are no longer auto-retried (was burning 3× the budget). Only true transport failures (refused, reset, throttled, DNS, socket) retry.
+- **🪪 Per-Request Trace IDs**: Each Kusto call carries a unique `client_request_id` for cross-process correlation.
+- **🧹 Schema-Driven Generation**: Removed all hardcoded table, cluster, and column names from the NL2KQL pipeline. Time columns and join keys are derived from the live schema.
+- **🧰 Cleanup**: Removed legacy manual verification scripts; added pinned regression tests for timeout, error classifier, and dry-run.
 
 ## 🆕 What's New in v2.1.1
 
@@ -167,6 +177,12 @@ pip install mcp-kql-server
 
 ## 📱 MCP Client Configuration
 
+> **One-time install (any platform):**
+> ```bash
+> pip install --upgrade mcp-kql-server
+> ```
+> After install, **prefer the `mcp-kql-server` console script** in your client config. It is dropped on PATH by `pip` and bypasses the "which Python is `python`?" trap that VS Code's Python extension creates by silently substituting a cached interpreter path.
+
 ### Claude Desktop
 
 Add to your Claude Desktop MCP settings file (`mcp_settings.json`):
@@ -180,13 +196,31 @@ Add to your Claude Desktop MCP settings file (`mcp_settings.json`):
 {
   "mcpServers": {
     "mcp-kql-server": {
-      "command": "python",
-      "args": ["-m", "mcp_kql_server"],
-      "env": {}
+      "type": "stdio",
+      "command": "mcp-kql-server",
+      "args": []
     }
   }
 }
 ```
+
+<details>
+<summary>Alternative: invoke via the Python module (Windows uses the <code>py</code> launcher)</summary>
+
+```json
+{
+  "mcpServers": {
+    "mcp-kql-server": {
+      "type": "stdio",
+      "command": "py",
+      "args": ["-3", "-m", "mcp_kql_server"]
+    }
+  }
+}
+```
+On macOS / Linux replace `"py"` with `"python3"`.
+</details>
+
 ### VSCode (with MCP Extension)
 
 Add to your VSCode MCP configuration:
@@ -198,16 +232,17 @@ Add to your VSCode MCP configuration:
 
 ```json
 {
- "MCP-kql-server": {
-			"command": "python",
-			"args": [
-				"-m",
-				"mcp_kql_server"
-			],
-			"type": "stdio"
-		}
+  "servers": {
+    "mcp-kql-server": {
+      "type": "stdio",
+      "command": "mcp-kql-server",
+      "args": []
+    }
+  }
 }
 ```
+
+> **If VS Code logs `spawn ...PythonNNN/python.exe ENOENT`**, the Python extension is substituting a cached interpreter path for `"python"`. Switch to the `"mcp-kql-server"` console script (above) or to `"py"` / `"python3"`. Do **not** use the bare string `"python"` on Windows when VS Code's Python extension is installed.
 
 ### Roo-code Or Cline (VS-code Extentions)
 
@@ -218,16 +253,12 @@ Ask or Add to your Roo-code Or Cline MCP settings:
 
 ```json
 {
-   "MCP-kql-server": {
-      "command": "python",
-      "args": [
-        "-m",
-        "mcp_kql_server"
-      ],
-      "type": "stdio",
-      "alwaysAllow": [
-      ]
-    },
+  "mcp-kql-server": {
+    "type": "stdio",
+    "command": "mcp-kql-server",
+    "args": [],
+    "alwaysAllow": []
+  }
 }
 ```
 
@@ -236,8 +267,12 @@ Ask or Add to your Roo-code Or Cline MCP settings:
 For any MCP-compatible application:
 
 ```bash
-# Command to run the server
-python -m mcp_kql_server
+# Preferred: console script installed by pip (cross-platform)
+mcp-kql-server
+
+# Equivalent module form (Windows uses the py launcher)
+py -3 -m mcp_kql_server     # Windows
+python3 -m mcp_kql_server   # macOS / Linux
 
 # Server provides these tools:
 # - execute_kql_query: Execute KQL or generate KQL from natural language

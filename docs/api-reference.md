@@ -1,6 +1,6 @@
 # API Reference - MCP KQL Server
 
-**Version**: 2.1.1
+**Version**: 2.1.2
 **Last Updated**: December 2025
 
 ---
@@ -580,6 +580,11 @@ formatted = schema_mgr.format_schema_for_display(schema_dict)
 | `KQL_LOG_LEVEL` | Logging level | INFO |
 | `KQL_POOL_SIZE` | Connection pool size | 10 |
 
+> **Hardcoded server-side ceiling**: As of v2.1.2 every Kusto call ships
+> `ClientRequestProperties.servertimeout` clamped to `KUSTO_MAX_QUERY_TIMEOUT_SECONDS = 600`
+> (10 minutes). Caller-supplied values above this ceiling are silently clamped.
+> See `mcp_kql_server/constants.py` and `mcp_kql_server/execute_kql.py:_build_request_properties`.
+
 ### 6.2 Constants
 
 ```python
@@ -587,6 +592,8 @@ from mcp_kql_server.constants import (
     SERVER_NAME,
     __version__,
     DEFAULT_QUERY_TIMEOUT,
+    KUSTO_MAX_QUERY_TIMEOUT_SECONDS,
+    KUSTO_MIN_QUERY_TIMEOUT_SECONDS,
     LIMITS,
     CONNECTION_CONFIG,
     ERROR_HANDLING_CONFIG
@@ -616,6 +623,7 @@ from mcp_kql_server.constants import (
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.1.2 | May 2026 | Hardcoded 10-min Kusto servertimeout, ADX dry-run validation, schema-drift recovery loop, schema-driven NL2KQL |
 | 2.1.1 | Dec 2025 | Improved CAG ranking, cache scoping, and runtime stability |
 | 2.1.0 | Dec 2025 | Schema-only NL2KQL, version checker |
 | 2.0.9 | Nov 2025 | CAG updates, SQLite migration |

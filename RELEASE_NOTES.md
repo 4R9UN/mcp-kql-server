@@ -2,6 +2,66 @@
 
 ---
 
+## 🚀 **v2.1.2 - Hardcoded Query Timeout, ADX Dry-Run & Schema-Drift Recovery**
+
+> **Make every Kusto call honor a 10-minute server-side budget, validate generated queries against the live engine, and self-heal on schema drift.**
+
+**Release Date**: May 1, 2026
+**Author**: Arjun Trivedi
+**Email**: arjuntrivedi42@yahoo.com
+**Repository**: https://github.com/4R9UN/mcp-kql-server
+
+### 🚀 **What's New in v2.1.2**
+
+This release focuses on execution reliability and NL2KQL accuracy. No new dependencies. No hardcoded table, cluster, or column names in any code path.
+
+#### **1. Hardcoded 10-minute Query Timeout**
+- New constant `KUSTO_MAX_QUERY_TIMEOUT_SECONDS = 600` is the single source of truth.
+- Every `KustoClient.execute` and `execute_mgmt` call now ships a `ClientRequestProperties` with `servertimeout` set to the clamped value. Previously the timeout parameter was silently ignored and ADX defaulted to ~4 minutes.
+- Caller-supplied timeouts are clamped to `[5s, 600s]`. Values of `0` or `None` resolve to the ceiling.
+- Each call also carries a unique `client_request_id` (`mcp-kql-<uuid>`) for cross-process tracing.
+
+#### **2. ADX-Side Dry-Run Validation**
+- New `dry_run_query(query, cluster, database)` wraps the candidate as `<query> | take 0` and lets the engine itself confirm semantic binding (table, column, function resolution).
+- The NL2KQL pipeline runs at most ONE dry-run per generation against the schema-validated leader candidate. If ADX rejects, the safe-repair fallback kicks in.
+- Catches schema drift the cached validator misses without returning rows.
+
+#### **3. Schema-Drift Recovery Loop**
+- On Kusto `SEM0100` / "failed to resolve" errors during direct execution, the server now: refreshes the impacted schemas, revalidates, attempts a schema-grounded repair, and retries exactly once. No infinite loops.
+- Error responses now expose an `error_class` field so callers can distinguish `timeout`, `throttled`, `transient`, `schema_drift`, `syntax`, `auth`, `permission`, and `permanent_other`.
+
+#### **4. Smarter Retry Policy**
+- `_is_retryable_exc` no longer treats server-side `servertimeout` / `request timed out` / `deadline_exceeded` as retryable. Long-running query timeouts are returned to the caller immediately instead of burning 3× the budget.
+- True transport failures (`connection refused`, `connection reset`, `unreachable`, throttling, DNS, socket) remain retryable with exponential backoff.
+
+#### **5. Schema-Driven NL2KQL**
+- Removed every hardcoded table, cluster, and column name from the generation pipeline:
+  - Time-column selection is now driven purely by datatype + token analysis of the live schema.
+  - Replacement scoring drops the `command/account/parent/file/path` substring boosts.
+  - Database hint suggestions no longer leak `scrubbeddata, Geneva, Samples`.
+- `MemoryManager.build_cag_bundle` now decorates each ranked table with a schema-derived `time_column` and `join_keys` filtered to columns that actually exist on that table.
+
+#### **6. Repository Cleanup**
+- Removed legacy manual verification scripts under `tests/verify_*.py` (7 files). They were dev artifacts that referenced symbols no longer in the codebase.
+- Added `tests/test_timeout_and_classifier.py` (24 pinned regression tests) covering: clamp boundaries, CRP `servertimeout` option, unique `client_request_id`, CRP forwarded as the third positional argument to both `execute` and `execute_mgmt`, error classifier categories, retry refusal of server-side timeouts, and dry-run wrapping/error classification.
+- Added Python 3.13 classifier to `pyproject.toml`.
+
+### 🛡️ **Compatibility**
+
+- Public tool contract for `execute_kql_query` and `schema_memory` is unchanged.
+- The new `error_class` field is additive on error responses.
+- No new runtime dependencies. `ClientRequestProperties` is already shipped by `azure-kusto-data`.
+
+### 📦 **Install**
+
+```bash
+pip install --upgrade mcp-kql-server==2.1.2
+```
+
+If you see warnings about other unrelated packages on your machine pinning older `fastmcp` or `pydantic` versions, those are pre-existing environment conflicts and do not affect the install of `mcp-kql-server` itself.
+
+---
+
 ## 🚀 **v2.1.1 - Schema-Grounded CAG & Runtime Accuracy**
 
 > **Strict schema-first generation, safer cache scoping, and repair-before-execute** 

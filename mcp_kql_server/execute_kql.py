@@ -13,14 +13,21 @@ import logging
 import re
 import time
 import json
+import uuid
+from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import numpy as np
+from azure.kusto.data import ClientRequestProperties
 from azure.kusto.data.exceptions import KustoServiceError
 
 # Constants import
-from .constants import DEFAULT_QUERY_TIMEOUT
+from .constants import (
+    DEFAULT_QUERY_TIMEOUT,
+    KUSTO_MAX_QUERY_TIMEOUT_SECONDS,
+    KUSTO_MIN_QUERY_TIMEOUT_SECONDS,
+)
 from .memory import get_memory_manager
 from .performance import get_connection_pool
 from .utils import (
@@ -32,6 +39,129 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Categorical labels used by classify_kusto_error to route retry / repair / fail decisions.
+ERROR_CLASS_TIMEOUT = "timeout"
+ERROR_CLASS_THROTTLED = "throttled"
+ERROR_CLASS_TRANSIENT = "transient"
+ERROR_CLASS_SCHEMA_DRIFT = "schema_drift"
+ERROR_CLASS_SYNTAX = "syntax"
+ERROR_CLASS_AUTH = "auth"
+ERROR_CLASS_PERMISSION = "permission"
+ERROR_CLASS_PERMANENT_OTHER = "permanent_other"
+
+# Errors that justify a one-shot repair attempt (schema refresh + regenerate).
+RECOVERABLE_ERROR_CLASSES = frozenset({ERROR_CLASS_SCHEMA_DRIFT})
+# Errors safe to retry transparently with backoff (network/transport class).
+AUTO_RETRY_ERROR_CLASSES = frozenset({ERROR_CLASS_TRANSIENT, ERROR_CLASS_THROTTLED})
+
+
+def classify_kusto_error(error: Any) -> str:
+    """Classify a Kusto / network error string into a retry-decision bucket.
+
+    No table, cluster or column names are matched here. Pure pattern routing.
+    """
+    text = str(error or "").lower()
+    if not text:
+        return ERROR_CLASS_PERMANENT_OTHER
+
+    # Server timeouts: do NOT auto-retry, the next attempt will burn the full window again.
+    if (
+        "servertimeout" in text
+        or "server timeout" in text
+        or "request timed out" in text
+        or "deadline_exceeded" in text
+        or "deadlineexceeded" in text
+        or "e_query_result_set_too_large" in text
+        or ("timeout" in text and "connection" not in text and "socket" not in text)
+    ):
+        return ERROR_CLASS_TIMEOUT
+
+    if "throttl" in text or "toomanyrequests" in text or "429" in text:
+        return ERROR_CLASS_THROTTLED
+
+    # Schema / column drift -> recoverable via schema refresh + repair.
+    if (
+        "sem0100" in text
+        or "failed to resolve" in text
+        or "could not be resolved" in text
+        or "unknown column" in text
+        or "unknown function" in text and "argument" not in text
+    ):
+        return ERROR_CLASS_SCHEMA_DRIFT
+
+    # Syntax errors that cannot be auto-fixed by schema repair.
+    if (
+        "syntaxerror" in text
+        or "sem0" in text
+        or "syn0" in text
+        or "invalidqueryargument" in text
+        or "badrequest" in text
+    ):
+        return ERROR_CLASS_SYNTAX
+
+    if (
+        "unauthorized" in text
+        or "authenticationfailed" in text
+        or "tokenexpired" in text
+        or "invalid_token" in text
+    ):
+        return ERROR_CLASS_AUTH
+
+    if "forbidden" in text or "permissiondenied" in text or "access denied" in text:
+        return ERROR_CLASS_PERMISSION
+
+    if (
+        "connection refused" in text
+        or "connection reset" in text
+        or "connection aborted" in text
+        or "unreachable" in text
+        or "servicenotavailable" in text
+        or "internalservererror" in text
+        or "temporaryfailure" in text
+        or "socket" in text
+        or "dns" in text and "resolution" in text
+    ):
+        return ERROR_CLASS_TRANSIENT
+
+    return ERROR_CLASS_PERMANENT_OTHER
+
+
+def _clamp_timeout(timeout_seconds: Optional[int]) -> int:
+    """Clamp caller-supplied timeout to the hardcoded server-side ceiling."""
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return min(DEFAULT_QUERY_TIMEOUT, KUSTO_MAX_QUERY_TIMEOUT_SECONDS)
+    return max(
+        KUSTO_MIN_QUERY_TIMEOUT_SECONDS,
+        min(int(timeout_seconds), KUSTO_MAX_QUERY_TIMEOUT_SECONDS),
+    )
+
+
+def _build_request_properties(timeout_seconds: int, query_text: str) -> ClientRequestProperties:
+    """Build ClientRequestProperties with hardcoded servertimeout cap and a trace id.
+
+    The hardcoded 10-minute ceiling lives in constants.KUSTO_MAX_QUERY_TIMEOUT_SECONDS.
+    """
+    crp = ClientRequestProperties()
+    effective_timeout = _clamp_timeout(timeout_seconds)
+    # servertimeout is the ADX-side execution budget. Without this, ADX defaults
+    # to ~4 minutes regardless of any client-side timeout.
+    crp.set_option(
+        ClientRequestProperties.request_timeout_option_name,
+        timedelta(seconds=effective_timeout),
+    )
+    # Disable the client SDK's own no-timeout escape hatch so we never exceed
+    # the hardcoded ceiling even if a caller passes 0 or None upstream.
+    try:
+        crp.set_option(ClientRequestProperties.no_request_timeout_option_name, False)
+    except (AttributeError, TypeError):
+        # Older azure-kusto-data builds may not expose this option name.
+        pass
+    crp.client_request_id = f"mcp-kql-{uuid.uuid4().hex}"
+    # Tiny prefix of the query is safe and helps server-side correlation in logs.
+    crp.application = "mcp-kql-server"
+    return crp
 
 
 
@@ -144,13 +274,23 @@ def _parse_kusto_response(response) -> pd.DataFrame:
     return df
 
 @retry_on_exception()
-def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _timeout: int = DEFAULT_QUERY_TIMEOUT) -> pd.DataFrame:
+def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, timeout: int = DEFAULT_QUERY_TIMEOUT) -> pd.DataFrame:
     """
     Core synchronous function to execute a KQL query against a Kusto cluster.
-    Adds configurable request timeout and uses retry decorator for transient failures.
+
+    The caller-supplied ``timeout`` is clamped by the hardcoded
+    ``KUSTO_MAX_QUERY_TIMEOUT_SECONDS`` ceiling and forwarded to ADX via
+    ``ClientRequestProperties.servertimeout``. Without this, ADX silently
+    enforces its own default (~4 min) regardless of client-side waits.
+    Adds a per-query ``client_request_id`` for cross-process tracing and
+    leaves transient transport retries to the ``retry_on_exception`` decorator.
     """
     cluster_url = normalize_cluster_uri(cluster)
-    logger.info("Executing KQL on %s/%s: %s...", cluster_url, database, kql_query[:150])
+    crp = _build_request_properties(timeout, kql_query)
+    logger.info(
+        "Executing KQL on %s/%s [request_id=%s timeout=%ss]: %s...",
+        cluster_url, database, crp.client_request_id, _clamp_timeout(timeout), kql_query[:150],
+    )
 
     get_connection_pool().register_health_check_database(cluster_url, database)
     client = _get_kusto_client(cluster_url)
@@ -161,9 +301,9 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _time
         # First execution attempt
         try:
             if is_mgmt_query:
-                response = client.execute_mgmt(database, kql_query)
+                response = client.execute_mgmt(database, kql_query, crp)
             else:
-                response = client.execute(database, kql_query)
+                response = client.execute(database, kql_query, crp)
 
             execution_time_ms = (time.time() - start_time) * 1000
             df = _parse_kusto_response(response)
@@ -179,16 +319,17 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, _time
 
         except KustoServiceError as e:
             error_str = str(e)
-            # Check for SEM0100 (Missing Column) or "Failed to resolve" errors
-            if 'sem0100' in error_str.lower() or "failed to resolve scalar expression" in error_str.lower():
-                logger.info("SEM0100 error detected: %s", error_str[:100])
-
-                # Trigger schema refresh for involved tables to prevent future errors
+            error_class = classify_kusto_error(error_str)
+            logger.info(
+                "Kusto error class=%s request_id=%s detail=%s",
+                error_class, crp.client_request_id, error_str[:160],
+            )
+            if error_class == ERROR_CLASS_SCHEMA_DRIFT:
+                # Trigger schema refresh for involved tables to enable a repair attempt upstream.
                 try:
                     tables = extract_tables_from_query(kql_query)
                     if tables:
                         loop = asyncio.get_running_loop()
-                        # Force refresh schema for these tables
                         loop.create_task(_ensure_schema_discovered(cluster, database, tables))
                 except (RuntimeError, Exception) as refresh_error:
                     logger.debug("Failed to trigger schema refresh on error: %s", refresh_error)
@@ -424,6 +565,53 @@ async def _ensure_schema_discovered(cluster_uri: str, database: str, tables: Lis
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             logger.warning("Auto schema discovery failed for %s: %s", table, e)
             # Continue with other tables even if one fails
+
+async def dry_run_query(
+    query: str,
+    cluster: str,
+    database: str,
+    timeout_seconds: int = 15,
+) -> Dict[str, Any]:
+    """Ask ADX itself to validate executability without returning rows.
+
+    Wraps the candidate query as ``<query> | take 0`` so the engine performs
+    full semantic resolution (table, column, function binding) but ships no
+    data. Management commands starting with '.' are skipped because they
+    cannot be wrapped with ``| take 0``.
+    """
+    result: Dict[str, Any] = {
+        "valid": False,
+        "executable": False,
+        "error": None,
+        "error_class": None,
+    }
+    if not query or not query.strip():
+        result["error"] = "empty query"
+        return result
+    if query.strip().startswith("."):
+        result.update(valid=True, executable=True, skipped=True)
+        return result
+    probe = f"{query.rstrip().rstrip(';')}\n| take 0"
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_execute_kusto_query_sync, probe, cluster, database, timeout_seconds),
+            timeout=timeout_seconds + 5,
+        )
+        result.update(valid=True, executable=True)
+        return result
+    except KustoServiceError as e:
+        result["error"] = str(e)[:300]
+        result["error_class"] = classify_kusto_error(e)
+        return result
+    except asyncio.TimeoutError:
+        result["error"] = "dry-run timeout"
+        result["error_class"] = ERROR_CLASS_TIMEOUT
+        return result
+    except Exception as e:  # pylint: disable=broad-except
+        result["error"] = str(e)[:300]
+        result["error_class"] = classify_kusto_error(e)
+        return result
+
 
 def get_knowledge_corpus():
     """Backward-compatible wrapper to memory.get_knowledge_corpus"""

@@ -1,6 +1,6 @@
 # Troubleshooting Guide - MCP KQL Server
 
-**Version**: 2.1.1
+**Version**: 2.1.2
 **Last Updated**: December 2025
 
 ---
@@ -533,6 +533,43 @@ for dep in deps:
 
 ## 8. MCP Integration Issues
 
+### Problem: VS Code logs `spawn ...PythonNNN/python.exe ENOENT`
+
+**Symptom:** Output panel shows something like
+`Error spawn C:/Users/.../Python312/python.exe ENOENT` even though you only ever installed Python 3.13.
+
+**Cause:** The VS Code Python extension intercepts a bare `"command": "python"` and substitutes its **cached selected interpreter** path. If that interpreter was uninstalled or upgraded, the spawn fails. `pip install` cannot prevent this; the path is stored by VS Code, not derived from `PATH`.
+
+**Fix (preferred):** use the console script that `pip install` drops on `PATH`. It is fully cross-platform and bypasses the Python-extension cache:
+
+```json
+{
+    "servers": {
+        "mcp-kql-server": {
+            "type": "stdio",
+            "command": "mcp-kql-server",
+            "args": []
+        }
+    }
+}
+```
+
+**Fix (alternative):** invoke through the platform-stable launcher.
+
+```json
+// Windows: py launcher always lives at C:\Windows\py.exe
+"command": "py",
+"args": ["-3", "-m", "mcp_kql_server"]
+```
+
+```json
+// macOS / Linux
+"command": "python3",
+"args": ["-m", "mcp_kql_server"]
+```
+
+Do **not** use the bare string `"python"` on Windows when the VS Code Python extension is installed.
+
 ### Problem: Server not detected by Claude
 
 **Symptoms:**
@@ -541,13 +578,14 @@ for dep in deps:
 
 **Solutions:**
 
-1. **Check mcp.json configuration:**
+1. **Check mcp.json configuration (preferred form, cross-platform):**
    ```json
    {
        "mcpServers": {
-           "kql-server": {
-               "command": "python",
-               "args": ["-m", "mcp_kql_server"]
+           "mcp-kql-server": {
+               "type": "stdio",
+               "command": "mcp-kql-server",
+               "args": []
            }
        }
    }

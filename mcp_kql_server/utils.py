@@ -35,10 +35,36 @@ from .constants import KQL_RESERVED_WORDS
 logger = logging.getLogger(__name__)
 
 def _is_retryable_exc(e: BaseException) -> bool:
-    """Lightweight dynamic check for retryable exceptions (message-based)."""
+    """Lightweight check for retryable transport-class exceptions.
+
+    Server-side timeouts are intentionally NOT retried here: a 10-minute query
+    that timed out should not silently burn another 20 minutes across attempts.
+    Real transport failures (refused, reset, dns, throttling) remain retryable.
+    """
     try:
         s = str(e).lower()
-        return any(k in s for k in ("timeout", "connection", "throttl", "unreachable", "refused", "kusto", "service"))
+        # Explicit non-retry: server-side servertimeout / request timed out.
+        if (
+            "servertimeout" in s
+            or "server timeout" in s
+            or "request timed out" in s
+            or "deadlineexceeded" in s
+            or "deadline_exceeded" in s
+        ):
+            return False
+        retryable_markers = (
+            "connection refused",
+            "connection reset",
+            "connection aborted",
+            "unreachable",
+            "throttl",
+            "toomanyrequests",
+            "servicenotavailable",
+            "temporaryfailure",
+            "socket",
+            "dns",
+        )
+        return any(k in s for k in retryable_markers)
     except (ValueError, TypeError, AttributeError):
         return False
 

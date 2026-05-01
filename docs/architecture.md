@@ -1,6 +1,6 @@
 # MCP KQL Server Architecture
 
-**Version**: 2.1.1
+**Version**: 2.1.2
 **Author**: Arjun Trivedi
 **Email**: arjuntrivedi42@yahoo.com
 **Last Updated**: December 2025
