@@ -24,4 +24,18 @@ jobs:
         run: ./mcp-publisher login github-oidc
 
       - name: Publish to MCP Registry
-        run: ./mcp-publisher publish
+        # Treat "cannot publish duplicate version" as a successful no-op so
+        # workflow re-runs (or pushing the same tag again) don't fail the job.
+        # Real failures (auth, schema, network) still surface as exit != 0.
+        run: |
+          set +e
+          OUT=$(./mcp-publisher publish 2>&1)
+          STATUS=$?
+          echo "$OUT"
+          if [ $STATUS -ne 0 ]; then
+            if echo "$OUT" | grep -qi "duplicate version"; then
+              echo "::notice::Version already published to MCP Registry; treating as success."
+              exit 0
+            fi
+            exit $STATUS
+          fi
