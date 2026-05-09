@@ -181,7 +181,7 @@ pip install mcp-kql-server
 > ```bash
 > pip install --upgrade mcp-kql-server
 > ```
-> After install, **prefer the `mcp-kql-server` console script** in your client config. It is dropped on PATH by `pip` and bypasses the "which Python is `python`?" trap that VS Code's Python extension creates by silently substituting a cached interpreter path.
+> After install, configure your MCP client to launch the server via the Python module entry point: `python -m mcp_kql_server`. This works on every platform where Python is on `PATH` and does not depend on the location of the `mcp-kql-server` console script. (The console script is still installed by `pip` and remains supported for backward compatibility — see the alternative snippets below.)
 
 ### Claude Desktop
 
@@ -197,16 +197,17 @@ Add to your Claude Desktop MCP settings file (`mcp_settings.json`):
   "mcpServers": {
     "mcp-kql-server": {
       "type": "stdio",
-      "command": "mcp-kql-server",
-      "args": []
+      "command": "python",
+      "args": ["-m", "mcp_kql_server"]
     }
   }
 }
 ```
 
 <details>
-<summary>Alternative: invoke via the Python module (Windows uses the <code>py</code> launcher)</summary>
+<summary>Alternatives: platform-stable launchers or the installed console script</summary>
 
+Windows (the `py` launcher always lives at `C:\Windows\py.exe`):
 ```json
 {
   "mcpServers": {
@@ -218,7 +219,20 @@ Add to your Claude Desktop MCP settings file (`mcp_settings.json`):
   }
 }
 ```
-On macOS / Linux replace `"py"` with `"python3"`.
+On macOS / Linux replace `"py"` with `"python3"` and drop the `"-3"` arg.
+
+Or use the console script that `pip install` drops on `PATH`:
+```json
+{
+  "mcpServers": {
+    "mcp-kql-server": {
+      "type": "stdio",
+      "command": "mcp-kql-server",
+      "args": []
+    }
+  }
+}
+```
 </details>
 
 ### VSCode (with MCP Extension)
@@ -235,14 +249,14 @@ Add to your VSCode MCP configuration:
   "servers": {
     "mcp-kql-server": {
       "type": "stdio",
-      "command": "mcp-kql-server",
-      "args": []
+      "command": "python",
+      "args": ["-m", "mcp_kql_server"]
     }
   }
 }
 ```
 
-> **If VS Code logs `spawn ...PythonNNN/python.exe ENOENT`**, the Python extension is substituting a cached interpreter path for `"python"`. Switch to the `"mcp-kql-server"` console script (above) or to `"py"` / `"python3"`. Do **not** use the bare string `"python"` on Windows when VS Code's Python extension is installed.
+> **If VS Code logs `spawn ...PythonNNN/python.exe ENOENT`**, the Python extension is substituting a cached interpreter path for `"python"`. Switch to `"py"` (Windows) / `"python3"` (macOS/Linux), or to the `"mcp-kql-server"` console script that `pip install` drops on `PATH`. See [docs/troubleshooting.md](docs/troubleshooting.md#8-mcp-integration-issues) for full details.
 
 ### Roo-code Or Cline (VS-code Extentions)
 
@@ -255,8 +269,8 @@ Ask or Add to your Roo-code Or Cline MCP settings:
 {
   "mcp-kql-server": {
     "type": "stdio",
-    "command": "mcp-kql-server",
-    "args": [],
+    "command": "python",
+    "args": ["-m", "mcp_kql_server"],
     "alwaysAllow": []
   }
 }
@@ -267,12 +281,15 @@ Ask or Add to your Roo-code Or Cline MCP settings:
 For any MCP-compatible application:
 
 ```bash
-# Preferred: console script installed by pip (cross-platform)
-mcp-kql-server
+# Preferred: invoke as a Python module (cross-platform)
+python -m mcp_kql_server
 
-# Equivalent module form (Windows uses the py launcher)
+# Platform-stable launchers (recommended if `python` is ambiguous on PATH)
 py -3 -m mcp_kql_server     # Windows
 python3 -m mcp_kql_server   # macOS / Linux
+
+# Equivalent console script installed by pip
+mcp-kql-server
 
 # Server provides these tools:
 # - execute_kql_query: Execute KQL or generate KQL from natural language

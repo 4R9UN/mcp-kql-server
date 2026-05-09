@@ -2,6 +2,19 @@
 
 ---
 
+## 📝 **Documentation update — recommended MCP launch command**
+
+The recommended MCP client configuration now uses the Python module entry point:
+
+```json
+"command": "python",
+"args": ["-m", "mcp_kql_server"]
+```
+
+This works on every platform where Python is on `PATH` and does not depend on the location of the `mcp-kql-server` console script. The console script is still installed by `pip` and remains fully supported (no breaking change). Windows users should still prefer `"command": "py", "args": ["-3", "-m", "mcp_kql_server"]` and macOS/Linux users `"command": "python3"` when `python` is ambiguous on `PATH`. See `README.md` and `docs/troubleshooting.md` for the updated snippets.
+
+---
+
 ## 🚀 **v2.1.2 - Hardcoded Query Timeout, ADX Dry-Run & Schema-Drift Recovery**
 
 > **Make every Kusto call honor a 10-minute server-side budget, validate generated queries against the live engine, and self-heal on schema drift.**

@@ -10,7 +10,9 @@
       "identifier": "mcp-kql-server",
       "version": "2.1.2",
       "transport": {
-        "type": "stdio"
+        "type": "stdio",
+        "command": "python",
+        "args": ["-m", "mcp_kql_server"]
       }
     }
   ]
