@@ -543,25 +543,11 @@ for dep in deps:
 **Fix (preferred):** invoke through the platform-stable launcher so the spawn cannot be hijacked by the Python extension's cached interpreter:
 
 ```json
-// Windows: py launcher always lives at C:\Windows\py.exe
 {
     "servers": {
         "mcp-kql-server": {
             "type": "stdio",
-            "command": "py",
-            "args": ["-3", "-m", "mcp_kql_server"]
-        }
-    }
-}
-```
-
-```json
-// macOS / Linux
-{
-    "servers": {
-        "mcp-kql-server": {
-            "type": "stdio",
-            "command": "python3",
+            "command": "python",
             "args": ["-m", "mcp_kql_server"]
         }
     }
