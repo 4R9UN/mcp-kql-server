@@ -248,7 +248,8 @@ async def test_execute_kql_query_repairs_invalid_time_column():
         })
         mocked_validator.validate_query = AsyncMock(side_effect=validation_results)
 
-        result = await mcp_server.execute_kql_query.fn(
+        execute_fn = getattr(mcp_server.execute_kql_query, "fn", mcp_server.execute_kql_query)
+        result = await execute_fn(
             query="MtpAlertEvidence | where AlertId == \"abc\" | order by Timestamp asc",
             cluster_url="cluster",
             database="db",

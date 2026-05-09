@@ -20,7 +20,7 @@ from .mcp_server import main
 from .version_checker import check_for_updates, get_current_version
 
 # Version information
-__version__ = "2.1.2"
+__version__ = "2.1.3"
 __author__ = "Arjun Trivedi"
 __email__ = "arjuntrivedi42@yahoo.com"
 
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 def _setup_memory_directories():
     """Initialize unified data directory and corpus file on import."""
     try:
-        from .constants import get_data_dir
+        from .constants import format_display_path, get_data_dir
         from .memory import get_memory_manager
 
         # Ensure unified data dir exists
@@ -64,7 +64,7 @@ def _setup_memory_directories():
         mm = get_memory_manager()
         mm.save_corpus()
         # Use canonical attribute name `memory_path` directly; avoid deprecated alias `corpus_path`
-        logger.info("Unified memory initialized at: %s", mm.memory_path)
+        logger.info("Unified memory initialized at: %s", format_display_path(mm.memory_path))
     except (OSError, RuntimeError, ImportError) as e:
         # Narrow exception types to avoid masking unexpected failures
         logger.debug("Unified memory setup skipped: %s", e)

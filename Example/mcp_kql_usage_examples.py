@@ -105,10 +105,10 @@ def example_performance_optimized() -> Dict[str, Any]:
 
 
 def example_schema_memory() -> Dict[str, Any]:
-    """Discover schema using the current schema_memory tool."""
+    """Discover schema using the current kql_schema_memory tool."""
 
     request = {
-        "tool": "schema_memory",
+        "tool": "kql_schema_memory",
         "input": {
             "operation": "discover",
             "cluster_url": "https://project-cluster.kusto.windows.net",
@@ -166,7 +166,7 @@ def usage_patterns():
     patterns = {
         "workflow_2_development": [
             "1. Run az login before starting the server locally",
-            "2. Use schema_memory(discover/list_tables/get_context) before NL2KQL-heavy sessions",
+            "2. Use kql_schema_memory(discover/list_tables/get_context) before NL2KQL-heavy sessions",
             "3. Prefer table or JSON output depending on how your MCP client renders results",
         ],
         "workflow_3_performance": [
@@ -177,8 +177,8 @@ def usage_patterns():
         "best_practices": [
             "Always authenticate with Azure CLI first (az login)",
             "Use specific time ranges to limit query scope",
-            "Use schema_memory(refresh_schema) when table metadata changes",
-            "Use schema_memory(get_context) to ground NL2KQL with the right tables",
+            "Use kql_schema_memory(refresh_schema) when table metadata changes",
+            "Use kql_schema_memory(get_context) to ground NL2KQL with the right tables",
             "Keep local Azure CLI auth and Azure-hosted managed identity flows documented separately",
         ],
     }

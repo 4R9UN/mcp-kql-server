@@ -1,6 +1,6 @@
 # MCP KQL Server Architecture
 
-**Version**: 2.1.2
+**Version**: 2.1.3
 **Author**: Arjun Trivedi
 **Email**: arjuntrivedi42@yahoo.com
 **Last Updated**: December 2025
@@ -60,16 +60,16 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
           │                 │                 │                 │
           └─────────────────┴────────┬────────┴─────────────────┘
                                      │
-                            MCP Protocol (stdio)
+                           MCP Protocol (stdio or streamable HTTP)
                                      │
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        MCP KQL Server (v2.1.1)                               │
+│                        MCP KQL Server (v2.1.3)                               │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │                         API Layer (mcp_server.py)                       │ │
 │  │  ┌─────────────────────────┐  ┌─────────────────────────────────────┐  │ │
-│  │  │  execute_kql_query      │  │  schema_memory                      │  │ │
+│  │  │  execute_kql_query      │  │  kql_schema_memory                  │  │ │
 │  │  │  - Direct KQL execution │  │  - discover, list_tables, get_context│ │ │
 │  │  │  - NL2KQL generation    │  │  - generate_report, clear_cache     │  │ │
 │  │  └─────────────────────────┘  └─────────────────────────────────────┘  │ │
@@ -151,7 +151,7 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
 
 | Module | Purpose | Key Classes/Functions |
 |--------|---------|----------------------|
-| `mcp_server.py` | MCP tool registration & routing | `execute_kql_query()`, `schema_memory()` |
+| `mcp_server.py` | MCP tool registration & routing | `execute_kql_query()`, `kql_schema_memory` (`schema_memory()` function) |
 | `execute_kql.py` | KQL execution engine | `kql_execute_tool()`, `_get_kusto_client()` |
 | `memory.py` | Persistent schema storage | `MemoryManager`, `SemanticSearch` |
 | `utils.py` | Utilities & helpers | `normalize_cluster_uri()`, `bracket_if_needed()`, `ErrorHandler`, `SchemaManager` |
@@ -530,7 +530,7 @@ The server tracks which tables exist in which clusters/databases:
 │  - get_all_table_locations() -> Dict[str, List[Dict]]            │
 │  - remove_table_location(table, cluster, database)               │
 │                                                                  │
-│  MCP Operations (schema_memory tool):                            │
+│  MCP Operations (kql_schema_memory tool):                        │
 │  - list_multi_cluster_tables: List all tracked tables            │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -636,11 +636,11 @@ from mcp_kql_server import (
 
 ## Conclusion
 
-The MCP KQL Server v2.1.1 architecture provides a robust, performant, and secure foundation for AI-augmented KQL query execution. Key enhancements in this version include:
+The MCP KQL Server v2.1.3 architecture provides a robust, performant, and secure foundation for AI-augmented KQL query execution. Key enhancements in this version include:
 
 - **Configurable TTL Cache**: Query-type-aware caching with automatic expiration
 - **Multi-Cluster Support**: Track and query tables across multiple Azure Data Explorer clusters
 - **Health Check Scheduling**: Background connection health monitoring and automatic cleanup
-- **Enhanced Statistics**: Detailed cache and memory statistics via new schema_memory operations
+- **Enhanced Statistics**: Detailed cache and memory statistics via new kql_schema_memory operations
 
 For questions or contributions, please refer to [CONTRIBUTING.md](../CONTRIBUTING.md).
