@@ -540,7 +540,35 @@ for dep in deps:
 
 **Cause:** The VS Code Python extension intercepts a bare `"command": "python"` and substitutes its **cached selected interpreter** path. If that interpreter was uninstalled or upgraded, the spawn fails. `pip install` cannot prevent this; the path is stored by VS Code, not derived from `PATH`.
 
-**Fix (preferred):** use the console script that `pip install` drops on `PATH`. It is fully cross-platform and bypasses the Python-extension cache:
+**Fix (preferred):** invoke through the platform-stable launcher so the spawn cannot be hijacked by the Python extension's cached interpreter:
+
+```json
+// Windows: py launcher always lives at C:\Windows\py.exe
+{
+    "servers": {
+        "mcp-kql-server": {
+            "type": "stdio",
+            "command": "py",
+            "args": ["-3", "-m", "mcp_kql_server"]
+        }
+    }
+}
+```
+
+```json
+// macOS / Linux
+{
+    "servers": {
+        "mcp-kql-server": {
+            "type": "stdio",
+            "command": "python3",
+            "args": ["-m", "mcp_kql_server"]
+        }
+    }
+}
+```
+
+**Fix (alternative):** use the console script that `pip install` drops on `PATH`. It is cross-platform but, like `"command": "python"`, is resolved through `PATH` and may still be intercepted on some VS Code setups:
 
 ```json
 {
@@ -552,20 +580,6 @@ for dep in deps:
         }
     }
 }
-```
-
-**Fix (alternative):** invoke through the platform-stable launcher.
-
-```json
-// Windows: py launcher always lives at C:\Windows\py.exe
-"command": "py",
-"args": ["-3", "-m", "mcp_kql_server"]
-```
-
-```json
-// macOS / Linux
-"command": "python3",
-"args": ["-m", "mcp_kql_server"]
 ```
 
 Do **not** use the bare string `"python"` on Windows when the VS Code Python extension is installed.
@@ -584,12 +598,13 @@ Do **not** use the bare string `"python"` on Windows when the VS Code Python ext
        "mcpServers": {
            "mcp-kql-server": {
                "type": "stdio",
-               "command": "mcp-kql-server",
-               "args": []
+               "command": "python",
+               "args": ["-m", "mcp_kql_server"]
            }
        }
    }
    ```
+   On Windows prefer `"command": "py", "args": ["-3", "-m", "mcp_kql_server"]`. On macOS/Linux prefer `"command": "python3"`. The `mcp-kql-server` console script installed by `pip` also remains supported.
 
 2. **Verify Python path:**
    ```json
