@@ -22,12 +22,29 @@ from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
 
-try:
-    from sentence_transformers import SentenceTransformer
-    HAS_SENTENCE_TRANSFORMERS = True
-except ImportError:
-    SentenceTransformer = None
-    HAS_SENTENCE_TRANSFORMERS = False
+SentenceTransformer = None
+HAS_SENTENCE_TRANSFORMERS = False
+_SENTENCE_TRANSFORMERS_IMPORT_ATTEMPTED = False
+
+
+def _get_sentence_transformer_class():
+    """Import SentenceTransformer only when semantic embeddings are used."""
+    global SentenceTransformer, HAS_SENTENCE_TRANSFORMERS  # pylint: disable=global-statement
+    global _SENTENCE_TRANSFORMERS_IMPORT_ATTEMPTED  # pylint: disable=global-statement
+    if _SENTENCE_TRANSFORMERS_IMPORT_ATTEMPTED and not HAS_SENTENCE_TRANSFORMERS:
+        return None
+    if SentenceTransformer is not None:
+        return SentenceTransformer
+    _SENTENCE_TRANSFORMERS_IMPORT_ATTEMPTED = True
+    try:
+        from sentence_transformers import SentenceTransformer as _SentenceTransformer
+        SentenceTransformer = _SentenceTransformer
+        HAS_SENTENCE_TRANSFORMERS = True
+        return SentenceTransformer
+    except ImportError:
+        SentenceTransformer = None
+        HAS_SENTENCE_TRANSFORMERS = False
+        return None
 
 logger = logging.getLogger(__name__)
 
@@ -86,18 +103,18 @@ class SemanticSearch:
 
     def preload(self):
         """Preload model in background thread for faster first query."""
-        if self.model is None and not self._loading and HAS_SENTENCE_TRANSFORMERS:
+        if self.model is None and not self._loading and _get_sentence_transformer_class():
             threading.Thread(target=self._load_model, daemon=True).start()
 
     def _load_model(self):
         """Thread-safe lazy load of the model."""
         with self._load_lock:
-            if self.model is None and HAS_SENTENCE_TRANSFORMERS:
+            transformer_cls = _get_sentence_transformer_class()
+            if self.model is None and transformer_cls:
                 self._loading = True
                 try:
                     logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
-                    if SentenceTransformer:
-                        self.model = SentenceTransformer(self.model_name)
+                    self.model = transformer_cls(self.model_name)
                     logger.info("Loaded Semantic Search model: %s", self.model_name)
                 except (OSError, RuntimeError, ValueError) as e:
                     logger.warning("Failed to load SentenceTransformer: %s", e)
@@ -158,9 +175,18 @@ class MemoryManager:
         base_dir.mkdir(parents=True, exist_ok=True)
         return base_dir / "kql_memory.db"
 
+    def _connect(self) -> sqlite3.Connection:
+        """Open a SQLite connection tuned for concurrent MCP instances."""
+        busy_timeout_ms = int(os.environ.get("MCP_KQL_SQLITE_BUSY_TIMEOUT_MS", "30000"))
+        conn = sqlite3.connect(self.db_path, timeout=busy_timeout_ms / 1000)
+        conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
     def _init_db(self):
         """Initialize SQLite database schema."""
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             # Enable WAL mode for better concurrency
             conn.execute("PRAGMA journal_mode=WAL")
 
@@ -303,7 +329,7 @@ class MemoryManager:
                     normalized_cols[col] = {"data_type": "string"}
             columns = normalized_cols
 
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             # Check if columns exist (migration for existing DBs)
             try:
                 conn.execute("ALTER TABLE schemas ADD COLUMN embedding BLOB")
@@ -350,7 +376,7 @@ class MemoryManager:
         col_names = " ".join(columns.keys())
         embedding = self.semantic_search.encode(f"Table {table} contains columns: {col_names}")
 
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
 
             conn.execute("""
                 INSERT OR REPLACE INTO schemas
@@ -371,7 +397,7 @@ class MemoryManager:
         normalized_cluster = self.normalize_cluster_uri(cluster)
         embedding = self.semantic_search.encode(f"{description} {query}")
 
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             # Check for new column (migration)
             try:
                 conn.execute("ALTER TABLE queries ADD COLUMN execution_time_ms REAL")
@@ -393,7 +419,7 @@ class MemoryManager:
     def store_learning_result(self, query: str, result_data: Dict[str, Any],
                               execution_type: str, execution_time_ms: float = 0.0):
         """Store learning result from query execution."""
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             # Check for new column (migration)
             try:
                 conn.execute("ALTER TABLE learning_events ADD COLUMN execution_time_ms REAL")
@@ -418,7 +444,7 @@ class MemoryManager:
         query_vector = np.frombuffer(query_embedding, dtype=np.float32)
         results = []
 
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 "SELECT table_name, columns_json, embedding FROM schemas WHERE cluster = ? AND database = ?",
                 (normalized_cluster, database)
@@ -452,7 +478,7 @@ class MemoryManager:
         query_vector = np.frombuffer(query_embedding, dtype=np.float32)
         results = []
 
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 "SELECT query, description, embedding FROM queries WHERE cluster = ? AND database = ?",
                 (normalized_cluster, database)
@@ -806,7 +832,7 @@ class MemoryManager:
         effective_ttl = ttl_map.get(query_type, ttl_seconds)
         normalized_cluster = self.normalize_cluster_uri(cluster or "") if cluster else None
 
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO query_cache 
                 (query_hash, result_json, timestamp, row_count, query_type, ttl_seconds, cluster, database)
@@ -839,7 +865,7 @@ class MemoryManager:
             cache_namespace=cache_namespace,
         )
 
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 "SELECT result_json, timestamp, ttl_seconds FROM query_cache WHERE query_hash = ?",
                 (query_hash,)
@@ -873,7 +899,7 @@ class MemoryManager:
         if clauses:
             delete_sql += " WHERE " + " AND ".join(clauses)
 
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             cursor = conn.execute(delete_sql, params)
             removed = cursor.rowcount
             conn.commit()
@@ -882,7 +908,7 @@ class MemoryManager:
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get detailed cache statistics."""
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             total = conn.execute("SELECT COUNT(*) FROM query_cache").fetchone()[0]
             by_type = {}
             cursor = conn.execute(
@@ -905,7 +931,7 @@ class MemoryManager:
 
     def cleanup_expired_cache(self) -> int:
         """Remove expired cache entries and return count of removed entries."""
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             cursor = conn.execute("""
                 DELETE FROM query_cache 
                 WHERE (julianday('now') - julianday(timestamp)) * 86400 > COALESCE(ttl_seconds, 300)
@@ -917,7 +943,7 @@ class MemoryManager:
 
     def store_join_hint(self, table1: str, table2: str, condition: str):
         """Store a discovered join relationship."""
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO join_hints (table1, table2, join_condition, confidence, last_used)
                 VALUES (?, ?, ?, 1.0, ?)
@@ -937,7 +963,7 @@ class MemoryManager:
             "SELECT table1, table2, join_condition FROM join_hints "
             f"WHERE table1 IN ({placeholders}) OR table2 IN ({placeholders})"
         )
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             cursor = conn.execute(query, tables + tables)
             for row in cursor:
                 hints.append(f"{row[0]} joins with {row[1]} on {row[2]}")
@@ -953,7 +979,7 @@ class MemoryManager:
             if (datetime.now() - cached['ts']).seconds < 300:  # 5 min TTL
                 return cached['data']
 
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 "SELECT table_name, columns_json FROM schemas WHERE cluster = ? AND database = ?",
                 (normalized_cluster, database)
@@ -1036,7 +1062,7 @@ class MemoryManager:
     def clear_memory(self) -> bool:
         """Clear all data from the database."""
         try:
-            with self._lock, sqlite3.connect(self.db_path) as conn:
+            with self._lock, self._connect() as conn:
                 conn.execute("DELETE FROM schemas")
                 conn.execute("DELETE FROM queries")
                 conn.execute("DELETE FROM query_cache")
@@ -1059,7 +1085,7 @@ class MemoryManager:
 
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get statistics about the memory database including cache stats."""
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             schema_count = conn.execute("SELECT COUNT(*) FROM schemas").fetchone()[0]
             query_count = conn.execute("SELECT COUNT(*) FROM queries").fetchone()[0]
             learning_count = 0
@@ -1100,7 +1126,7 @@ class MemoryManager:
 
     def get_performance_metrics(self) -> Dict[str, Any]:
         """Get performance metrics (execution time, success rate)."""
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             # Average execution time
             try:
                 avg_time = conn.execute(
@@ -1120,7 +1146,7 @@ class MemoryManager:
 
     def get_recent_queries(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get recent successful queries."""
-        with self._lock, sqlite3.connect(self.db_path) as conn:
+        with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 "SELECT query, description, cluster, database, timestamp FROM queries ORDER BY id DESC LIMIT ?",
                 (limit,)
@@ -1213,7 +1239,7 @@ class MemoryManager:
             True if registered successfully, False otherwise
         """
         try:
-            with self._lock, sqlite3.connect(self.db_path) as conn:
+            with self._lock, self._connect() as conn:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO table_locations 
@@ -1239,7 +1265,7 @@ class MemoryManager:
             List of dicts with 'cluster', 'database', 'last_seen' keys
         """
         try:
-            with self._lock, sqlite3.connect(self.db_path) as conn:
+            with self._lock, self._connect() as conn:
                 cursor = conn.execute(
                     """
                     SELECT cluster, database, last_seen 
@@ -1268,7 +1294,7 @@ class MemoryManager:
             True if table is found in more than one cluster
         """
         try:
-            with self._lock, sqlite3.connect(self.db_path) as conn:
+            with self._lock, self._connect() as conn:
                 cursor = conn.execute(
                     """
                     SELECT COUNT(DISTINCT cluster) 
@@ -1291,7 +1317,7 @@ class MemoryManager:
             Dict mapping table names to lists of location dicts
         """
         try:
-            with self._lock, sqlite3.connect(self.db_path) as conn:
+            with self._lock, self._connect() as conn:
                 cursor = conn.execute(
                     """
                     SELECT table_name, cluster, database, last_seen 
@@ -1329,7 +1355,7 @@ class MemoryManager:
             True if removed successfully
         """
         try:
-            with self._lock, sqlite3.connect(self.db_path) as conn:
+            with self._lock, self._connect() as conn:
                 conn.execute(
                     """
                     DELETE FROM table_locations 

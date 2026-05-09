@@ -127,6 +127,21 @@ class TestKQLAuth(unittest.TestCase):
 
     @patch("mcp_kql_server.kql_auth.trigger_az_cli_auth")
     @patch("mcp_kql_server.kql_auth.kql_auth")
+    def test_authenticate_non_interactive_does_not_login(self, mock_kql_auth, mock_trigger_auth):
+        """Test non-interactive auth check never starts device-code login."""
+        mock_kql_auth.return_value = {
+            "authenticated": False,
+            "message": "Not authenticated",
+        }
+
+        result = authenticate(interactive=False)
+
+        self.assertFalse(result["authenticated"])
+        self.assertTrue(result["interactive_required"])
+        mock_trigger_auth.assert_not_called()
+
+    @patch("mcp_kql_server.kql_auth.trigger_az_cli_auth")
+    @patch("mcp_kql_server.kql_auth.kql_auth")
     def test_authenticate_login_fails(self, mock_kql_auth, mock_trigger_auth):
         """Test authenticate when login fails."""
         # Mock not authenticated initially

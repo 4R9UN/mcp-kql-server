@@ -1,7 +1,7 @@
 # MCP KQL Server Dependencies
 
 # Core MCP Framework
-fastmcp>=2.10.0,<3.0.0
+fastmcp>=2.14.7,<4.0.0
 pydantic>=2.0.0,<3.0.0
 typing-extensions>=4.0.0,<5.0.0
 

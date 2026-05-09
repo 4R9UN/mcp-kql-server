@@ -1,6 +1,6 @@
 # API Reference - MCP KQL Server
 
-**Version**: 2.1.2
+**Version**: 2.1.3
 **Last Updated**: December 2025
 
 ---
@@ -91,7 +91,7 @@ result = await execute_kql_query(
 
 ---
 
-### 1.2 schema_memory
+### 1.2 kql_schema_memory
 
 Manage schema discovery, caching, and AI context generation.
 
@@ -579,8 +579,16 @@ formatted = schema_mgr.format_schema_for_display(schema_dict)
 | `KQL_MEMORY_PATH` | Custom memory DB path | Auto |
 | `KQL_LOG_LEVEL` | Logging level | INFO |
 | `KQL_POOL_SIZE` | Connection pool size | 10 |
+| `FASTMCP_TRANSPORT` | Server transport: `stdio`, `http`, `streamable-http`, or `sse` | `stdio` |
+| `FASTMCP_HOST` | HTTP bind host | `127.0.0.1` |
+| `FASTMCP_PORT` | HTTP bind port | `8000` |
+| `FASTMCP_STREAMABLE_HTTP_PATH` | Streamable HTTP endpoint path | `/mcp` |
+| `FASTMCP_STATELESS_HTTP` | Stateless HTTP mode for shared deployments | `false` |
+| `MCP_KQL_AUTH_ON_STARTUP` | Check Azure CLI auth before server startup | `false` |
+| `MCP_KQL_CHECK_FOR_UPDATES` | Check PyPI for package updates at startup | `false` |
+| `MCP_KQL_SQLITE_BUSY_TIMEOUT_MS` | SQLite busy timeout for concurrent MCP instances | `30000` |
 
-> **Hardcoded server-side ceiling**: As of v2.1.2 every Kusto call ships
+> **Hardcoded server-side ceiling**: As of v2.1.3 every Kusto call ships
 > `ClientRequestProperties.servertimeout` clamped to `KUSTO_MAX_QUERY_TIMEOUT_SECONDS = 600`
 > (10 minutes). Caller-supplied values above this ceiling are silently clamped.
 > See `mcp_kql_server/constants.py` and `mcp_kql_server/execute_kql.py:_build_request_properties`.
@@ -602,16 +610,32 @@ from mcp_kql_server.constants import (
 
 ### 6.3 MCP Configuration (mcp.json)
 
+Stdio mode is recommended for local clients:
+
 ```json
 {
-    "mcpServers": {
-        "kql-server": {
+    "servers": {
+        "mcpKqlServer": {
+            "type": "stdio",
             "command": "python",
-            "args": ["-m", "mcp_kql_server"],
-            "env": {
-                "KQL_QUERY_TIMEOUT": "300",
-                "KQL_LOG_LEVEL": "INFO"
-            }
+            "args": ["-m", "mcp_kql_server"]
+        }
+    }
+}
+```
+
+Shared HTTP mode lets multiple MCP clients connect to one running server:
+
+```bash
+python -m mcp_kql_server --transport http --host 127.0.0.1 --port 8000 --http-path /mcp --stateless-http
+```
+
+```json
+{
+    "servers": {
+        "mcpKqlServer": {
+            "type": "http",
+            "url": "http://127.0.0.1:8000/mcp"
         }
     }
 }
@@ -623,6 +647,7 @@ from mcp_kql_server.constants import (
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.1.3 | May 2026 | FastMCP 3 compatibility range, faster startup, lazy auth, shared HTTP transport, SQLite concurrency hardening, README cleanup |
 | 2.1.2 | May 2026 | Hardcoded 10-min Kusto servertimeout, ADX dry-run validation, schema-drift recovery loop, schema-driven NL2KQL |
 | 2.1.1 | Dec 2025 | Improved CAG ranking, cache scoping, and runtime stability |
 | 2.1.0 | Dec 2025 | Schema-only NL2KQL, version checker |

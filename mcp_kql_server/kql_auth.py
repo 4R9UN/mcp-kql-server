@@ -8,6 +8,7 @@ Supports AzureCliCredential for async clients.
 Author: Arjun Trivedi
 Email: arjuntrivedi42@yahoo.com
 """
+# pylint: disable=broad-exception-caught
 
 import subprocess
 import platform
@@ -20,6 +21,9 @@ from azure.identity import AzureCliCredential
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+AUTH_CHECK_TIMEOUT_SECONDS = int(os.environ.get("MCP_KQL_AUTH_CHECK_TIMEOUT_SECONDS", "10"))
+AUTH_LOGIN_TIMEOUT_SECONDS = int(os.environ.get("MCP_KQL_AUTH_LOGIN_TIMEOUT_SECONDS", "120"))
 
 @lru_cache(maxsize=1)
 def get_azure_credential() -> AzureCliCredential:
@@ -44,14 +48,14 @@ def kql_auth():
         env = os.environ.copy()
         subprocess.run(
             [az_command, "config", "set", "core.login_experience_v2=off"],
-            env=env, capture_output=True, text=True, check=True, timeout=60
+            env=env, capture_output=True, text=True, check=True, timeout=AUTH_CHECK_TIMEOUT_SECONDS
         )
         subprocess.run(
             [az_command, "account", "get-access-token"],
-            env=env, capture_output=True, text=True, check=True, timeout=60
+            env=env, capture_output=True, text=True, check=True, timeout=AUTH_CHECK_TIMEOUT_SECONDS
         )
         logger.info("User is authenticated with Azure CLI.")
-        return {"authenticated": True, "message": "User is authenticated."}
+        return {"authenticated": True, "message": "User is authenticated.", "auth_method": "azure-cli"}
     except subprocess.TimeoutExpired:
         logger.error("Authentication check timed out.")
         return {"authenticated": False, "message": "Authentication check timed out."}
@@ -81,15 +85,15 @@ def trigger_az_cli_auth():
     try:
         subprocess.run(
             [az_command, "config", "set", "core.login_experience_v2=off"],
-            env=env, capture_output=True, text=True, check=True, timeout=60
+            env=env, capture_output=True, text=True, check=True, timeout=AUTH_CHECK_TIMEOUT_SECONDS
         )
         auth_result = subprocess.run(
             [az_command, "login", "--use-device-code"],
-            capture_output=True, text=True, env=env, timeout=120, check=False
+            capture_output=True, text=True, env=env, timeout=AUTH_LOGIN_TIMEOUT_SECONDS, check=False
         )
         if auth_result.returncode == 0:
             logger.info("Azure CLI login successful.")
-            return {"authenticated": True, "message": "Azure CLI login successful."}
+            return {"authenticated": True, "message": "Azure CLI login successful.", "auth_method": "azure-cli"}
         logger.error("Azure CLI login failed: %s", auth_result.stderr)
         return {"authenticated": False, "message": auth_result.stderr}
     except subprocess.TimeoutExpired:
@@ -99,9 +103,13 @@ def trigger_az_cli_auth():
         logger.error("Authentication attempt failed: %s", str(e))
         return {"authenticated": False, "message": str(e)}
 
-def authenticate():
+def authenticate(interactive: bool = True):
     """
     Complete authentication flow with caching and retry logic.
+
+    Args:
+        interactive: If False, never starts device-code login. This keeps MCP
+            startup and tool discovery fast in hosts that cannot answer prompts.
 
     Returns:
         dict: Final authentication status and message
@@ -114,6 +122,14 @@ def authenticate():
         return auth_status
 
     logger.info("Not authenticated. Initiating Azure login...")
+    if not interactive:
+        return {
+            "authenticated": False,
+            "message": "Azure CLI is not authenticated. Run 'az login' in a terminal, then retry.",
+            "auth_method": "azure-cli",
+            "interactive_required": True,
+        }
+
     auth_status = trigger_az_cli_auth()
 
     if not auth_status["authenticated"]:
@@ -125,14 +141,18 @@ def authenticate():
 
     return auth_status
 
-def authenticate_kusto() -> Dict[str, Any]:
+def authenticate_kusto(interactive: bool = True) -> Dict[str, Any]:
     """
     Wrapper function for compatibility with existing code.
+
+    Args:
+        interactive: If False, skip device-code login and return a structured
+            unauthenticated status instead.
 
     Returns:
         dict: Authentication status and message
     """
-    return authenticate()
+    return authenticate(interactive=interactive)
 
 if __name__ == "__main__":
     result = authenticate()

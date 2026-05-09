@@ -112,6 +112,51 @@ class TestMCPServerFunctions(unittest.TestCase):
         # Note: clear_schema_cache is available via SchemaManager, not directly on memory manager
         self.assertTrue(hasattr(manager, 'corpus') or hasattr(manager, 'memory_path'))
 
+    @patch("sys.argv", ["mcp-kql-server"])
+    @patch("mcp_kql_server.version_checker.startup_version_check")
+    @patch("mcp_kql_server.mcp_server.mcp.run")
+    @patch("mcp_kql_server.mcp_server.authenticate_kusto")
+    def test_main_defers_auth_and_update_check(
+            self, mock_authenticate, mock_run, mock_version_check):
+        """Test default startup avoids blocking auth and PyPI update checks."""
+        from mcp_kql_server.mcp_server import main
+
+        main()
+
+        mock_authenticate.assert_not_called()
+        mock_version_check.assert_not_called()
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args.kwargs["transport"], "stdio")
+
+    @patch(
+        "sys.argv",
+        [
+            "mcp-kql-server",
+            "--transport", "http",
+            "--port", "8123",
+            "--http-path", "/kql",
+            "--stateless-http",
+        ],
+    )
+    @patch("mcp_kql_server.version_checker.startup_version_check")
+    @patch("mcp_kql_server.mcp_server.mcp.run")
+    @patch("mcp_kql_server.mcp_server.authenticate_kusto")
+    def test_main_configures_streamable_http_transport(
+            self, mock_authenticate, mock_run, mock_version_check):
+        """Test shared HTTP mode passes v3-compatible transport settings to FastMCP."""
+        from mcp_kql_server.mcp_server import main
+
+        main()
+
+        mock_authenticate.assert_not_called()
+        mock_version_check.assert_not_called()
+        mock_run.assert_called_once()
+        kwargs = mock_run.call_args.kwargs
+        self.assertEqual(kwargs["transport"], "streamable-http")
+        self.assertEqual(kwargs["port"], 8123)
+        self.assertEqual(kwargs["path"], "/kql")
+        self.assertTrue(kwargs["stateless_http"])
+
 
     @pytest.mark.skip(reason="_execute_kql_query_logic was refactored into execute_kql_query")
     @patch("mcp_kql_server.mcp_server.kql_execute_tool")
