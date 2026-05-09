@@ -35,26 +35,6 @@ Watch a quick demo of the MCP KQL Server in action:
 
 [![MCP KQL Server Demo](https://img.youtube.com/vi/Ca-yuThJ3Vc/0.jpg)](https://www.youtube.com/watch?v=Ca-yuThJ3Vc)
 
-## 🆕 What's New in v2.1.2
-
-- **⏱️ Hardcoded 10-min Query Timeout**: Every Kusto call now ships `ClientRequestProperties.servertimeout` (capped at 600s). Long queries no longer silently die at the ADX default of ~4 minutes.
-- **🔍 ADX-Side Dry-Run Validation**: NL2KQL leader candidates are wrapped as `<query> | take 0` and bound by ADX itself. Catches schema drift the cached validator misses, costs zero rows.
-- **🔁 Schema-Drift Recovery Loop**: On `SEM0100` / "failed to resolve" failures the server refreshes the schema, repairs the query against real columns, and retries exactly once. No infinite loops.
-- **🧭 Smarter Retry Policy**: Server-side timeouts are no longer auto-retried (was burning 3× the budget). Only true transport failures (refused, reset, throttled, DNS, socket) retry.
-- **🪪 Per-Request Trace IDs**: Each Kusto call carries a unique `client_request_id` for cross-process correlation.
-- **🧹 Schema-Driven Generation**: Removed all hardcoded table, cluster, and column names from the NL2KQL pipeline. Time columns and join keys are derived from the live schema.
-- **🧰 Cleanup**: Removed legacy manual verification scripts; added pinned regression tests for timeout, error classifier, and dry-run.
-
-## 🆕 What's New in v2.1.1
-
-- **🎯 Schema-First CAG**: KQL generation now ranks tables and columns from cached schema context before building queries.
-- **🧠 Strict Table Context**: `schema_memory(operation="get_context")` can be scoped to a specific table and returns allowed/recommended columns.
-- **🩹 Schema-Grounded Repair**: Invalid client-generated KQL can be repaired against real schema columns before execution.
-- **💾 Safer Cache Isolation**: Query-result cache is scoped by query, cluster, database, and output namespace.
-- **♻️ No Redundant Reindexing**: Existing cached schemas are reused and no longer overwritten by placeholder discovery paths.
-
-See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
-
 ## 🚀 Features
 
 - **`execute_kql_query`**:
