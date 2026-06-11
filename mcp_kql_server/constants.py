@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-# Version information - Single source of truth from pyproject.toml
-__version__ = "2.1.3"
+# Version information - single source of truth for the package version.
+# Keep this in sync with pyproject.toml and server.json (CI enforces parity).
+__version__ = "2.1.4"
 VERSION = __version__
 MCP_PROTOCOL_VERSION = "2024-11-05"
 

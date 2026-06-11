@@ -19,8 +19,8 @@ from .execute_kql import execute_kql_query
 from .mcp_server import main
 from .version_checker import check_for_updates, get_current_version
 
-# Version information
-__version__ = "2.1.3"
+# Version information - single source of truth lives in constants.py
+__version__ = VERSION
 __author__ = "Arjun Trivedi"
 __email__ = "arjuntrivedi42@yahoo.com"
 

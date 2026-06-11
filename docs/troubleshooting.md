@@ -1,6 +1,6 @@
 # Troubleshooting Guide - MCP KQL Server
 
-**Version**: 2.1.3
+**Version**: 2.1.4
 **Last Updated**: December 2025
 
 ---

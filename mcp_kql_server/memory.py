@@ -8,6 +8,7 @@ This module provides a high-performance memory system that:
 - Supports Semantic Search (using sentence-transformers) for Few-Shot prompting.
 
 Author: Arjun Trivedi
+Email: arjuntrivedi42@yahoo.com
 """
 
 import sqlite3

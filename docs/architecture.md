@@ -1,6 +1,6 @@
 # MCP KQL Server Architecture
 
-**Version**: 2.1.3
+**Version**: 2.1.4
 **Author**: Arjun Trivedi
 **Email**: arjuntrivedi42@yahoo.com
 **Last Updated**: December 2025
@@ -64,7 +64,7 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
                                      │
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        MCP KQL Server (v2.1.3)                               │
+│                        MCP KQL Server (v2.1.4)                               │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │                         API Layer (mcp_server.py)                       │ │
@@ -636,7 +636,7 @@ from mcp_kql_server import (
 
 ## Conclusion
 
-The MCP KQL Server v2.1.3 architecture provides a robust, performant, and secure foundation for AI-augmented KQL query execution. Key enhancements in this version include:
+The MCP KQL Server v2.1.4 architecture provides a robust, performant, and secure foundation for AI-augmented KQL query execution. Key enhancements in this version include:
 
 - **Configurable TTL Cache**: Query-type-aware caching with automatic expiration
 - **Multi-Cluster Support**: Track and query tables across multiple Azure Data Explorer clusters

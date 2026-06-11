@@ -17,6 +17,9 @@ Functions implemented here:
  - validate_all_query_columns
  - fix_query_with_real_schema
  - generate_query_description
+
+Author: Arjun Trivedi
+Email: arjuntrivedi42@yahoo.com
 """
 import asyncio
 import difflib
@@ -33,6 +36,76 @@ from .constants import KQL_RESERVED_WORDS
 
 # Set up logger at module level
 logger = logging.getLogger(__name__)
+
+# Patterns for credentials that must never reach logs. KQL queries normally do
+# not embed secrets (auth is delegated to the Azure credential chain), but a
+# user could paste an inline connection string or token. Redact defensively.
+_SECRET_PATTERNS = [
+    # user:password@host inside a connection/cluster string
+    (re.compile(r'(://[^/\s:]+:)([^@/\s]+)(@)'), r'\1***\3'),
+    # bare bearer/JWT-like tokens (run before the key=value rule so the token
+    # after "Authorization: Bearer" is masked rather than just the word "Bearer")
+    (re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._\-]+'), 'bearer ***'),
+    # key=value style secrets (password, secret, token, apikey, pwd, sig, etc.)
+    (re.compile(
+        r'(?i)\b(password|pwd|secret|token|api[_-]?key|client[_-]?secret|sig|signature|authorization)'
+        r'(\s*[=:]\s*)("?)([^\s"&;,)]+)(\3)'
+    ), r'\1\2\3***\5'),
+]
+
+
+def redact_secrets(text: Optional[str]) -> str:
+    """Mask credentials in text before it is written to logs.
+
+    Conservative by design: it only masks values that match well-known secret
+    patterns and leaves ordinary query text intact so logs stay useful for
+    debugging. Returns an empty string for ``None``.
+    """
+    if not text:
+        return ""
+    redacted = str(text)
+    for pattern, replacement in _SECRET_PATTERNS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
+# Canonical KQL/CSL scalar types. Schema discovery can surface a column's type
+# as a CSL type ("datetime"), a .NET type ("System.Int64"), or an inferred
+# guess. Downstream NL2KQL generation keys off canonical lowercase KQL types
+# (it only builds time filters for "datetime" columns, groups/filters on
+# "string"/"guid", etc.), so every ingestion path must collapse to one vocabulary.
+_KQL_TYPE_ALIASES = {
+    "system.datetime": "datetime", "datetime": "datetime", "date": "datetime",
+    "system.string": "string", "string": "string", "text": "string",
+    "system.boolean": "bool", "boolean": "bool", "bool": "bool", "system.sbyte": "bool",
+    "system.int16": "int", "int16": "int", "system.int32": "int", "int32": "int", "int": "int",
+    "system.int64": "long", "int64": "long", "long": "long",
+    "system.single": "real", "single": "real", "float": "real",
+    "system.double": "real", "double": "real", "real": "real",
+    "system.decimal": "decimal", "decimal": "decimal",
+    "system.guid": "guid", "guid": "guid", "uuid": "guid",
+    "system.timespan": "timespan", "timespan": "timespan",
+    "system.object": "dynamic", "object": "dynamic", "dynamic": "dynamic", "array": "dynamic",
+}
+
+
+def normalize_kql_type(raw_type: Any) -> str:
+    """Normalize a CSL/.NET/inferred column type to a canonical lowercase KQL type.
+
+    Schema discovery may report a type as a CSL type ("datetime"), a .NET type
+    ("System.Int64"), or an inferred guess. NL2KQL generation only reasons about
+    canonical KQL types, so collapse every spelling to one vocabulary
+    (datetime, string, bool, int, long, real, decimal, guid, timespan, dynamic).
+    Unknown types fall through as a cleaned lowercase string instead of guessing.
+    """
+    if not raw_type:
+        return "string"
+    key = str(raw_type).strip().lower()
+    if key in _KQL_TYPE_ALIASES:
+        return _KQL_TYPE_ALIASES[key]
+    stripped = key.replace("system.", "")
+    return _KQL_TYPE_ALIASES.get(stripped, stripped or "string")
+
 
 def _is_retryable_exc(e: BaseException) -> bool:
     """Lightweight check for retryable transport-class exceptions.
@@ -418,7 +491,7 @@ class SchemaManager:
                             logger.debug("Successfully executed query on attempt %s", attempt + 1)
                             return data
                         else:
-                            logger.warning("Query returned no results: %s", query)
+                            logger.warning("Query returned no results: %s", redact_secrets(query))
                             return []
 
                 except (OSError, RuntimeError, ValueError, TimeoutError) as e:
@@ -430,7 +503,7 @@ class SchemaManager:
 
                     # Check if this is the final attempt
                     if attempt >= max_retries:
-                        logger.error("All retry attempts exhausted for query: %s", query)
+                        logger.error("All retry attempts exhausted for query: %s", redact_secrets(query))
                         break
 
                     # Check if error is retryable
@@ -672,7 +745,7 @@ class SchemaManager:
                     columns = {}
                     for col in schema_json.get('Schema', {}).get('OrderedColumns', []):
                         col_name = col['Name']
-                        col_type = col['CslType']
+                        col_type = normalize_kql_type(col.get('CslType') or col.get('ColumnType') or col.get('DataType'))
                         sample_values = sample_data.get(col_name, [])
                         columns[col_name] = {
                             'data_type': col_type,
@@ -716,10 +789,11 @@ class SchemaManager:
                     columns = {}
                     for i, row in enumerate(getschema_result):
                         col_name = row.get('ColumnName') or row.get('Column') or f'Column{i}'
-                        col_type = row.get('DataType') or row.get('ColumnType') or 'string'
-
-                        # Clean up data type
-                        col_type = str(col_type).replace('System.', '').lower()
+                        # Prefer the CSL/KQL type (ColumnType) over the .NET DataType
+                        # so the canonical KQL type (e.g. "long") is stored, not "Int64".
+                        col_type = normalize_kql_type(
+                            row.get('ColumnType') or row.get('DataType') or 'string'
+                        )
 
                         sample_values = sample_data.get(col_name, [])
                         columns[col_name] = {
@@ -875,10 +949,11 @@ class SchemaManager:
             if not col_name:
                 continue
 
-            # Extract accurate data type from DataType column
-            data_type = str(row.get('DataType', 'unknown')).replace("System.", "")
-            if data_type == "unknown" and row.get('ColumnType'):
-                data_type = str(row.get('ColumnType', 'unknown'))
+            # Extract the canonical KQL type, preferring the CSL ColumnType over
+            # the .NET DataType so generation sees "long"/"datetime", not "Int64".
+            data_type = normalize_kql_type(
+                row.get('ColumnType') or row.get('DataType') or row.get('CslType')
+            )
 
             # Extract sample values from sample data (limit to 3)
             sample_values = self._extract_sample_values_from_data(col_name, sample_data)
@@ -1655,6 +1730,8 @@ __all__ = [
     "extract_cluster_and_database_from_query",
     "extract_tables_from_query",
     "parse_query_entities",
+    "redact_secrets",
+    "normalize_kql_type",
 ]
 
 def extract_cluster_and_database_from_query(query: str) -> Tuple[Optional[str], Optional[str]]:

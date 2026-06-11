@@ -42,6 +42,7 @@ from .memory import get_memory_manager
 from .utils import (
     bracket_if_needed, SchemaManager, ErrorHandler,
     extract_cluster_and_database_from_query,
+    redact_secrets,
 )
 from .kql_auth import authenticate_kusto
 from .kql_validator import KQLValidator
@@ -934,7 +935,7 @@ async def execute_kql_query(
                 return json.dumps(result, indent=2)
 
         if df is None or df.empty:
-            logger.info("Query returned empty result (no rows) for: %s...", query[:100])
+            logger.info("Query returned empty result (no rows) for: %s...", redact_secrets(query[:100]))
             result = {
                 "success": True,
                 "error": None,

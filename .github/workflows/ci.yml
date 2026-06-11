@@ -56,14 +56,18 @@ jobs:
         echo "Checking version consistency"
         PYPROJECT_VERSION=$(python -c "import toml; print(toml.load('pyproject.toml')['project']['version'])")
         echo "pyproject.toml version: $PYPROJECT_VERSION"
-        INIT_VERSION=$(grep -E '^__version__\s*=' mcp_kql_server/__init__.py | sed 's/.*=\s*["'"'"'"]\([^"'"'"']*\)["'"'"'"].*/\1/')
-        echo "__init__.py version: $INIT_VERSION"
-        if [ "$PYPROJECT_VERSION" = "$INIT_VERSION" ]; then
+        # constants.py holds the literal single source of truth; __init__.py re-exports it.
+        CONST_VERSION=$(grep -E '^__version__\s*=' mcp_kql_server/constants.py | sed 's/.*=\s*["'"'"'"]\([^"'"'"']*\)["'"'"'"].*/\1/')
+        echo "constants.py version: $CONST_VERSION"
+        SERVER_JSON_VERSION=$(python -c "import json; print(json.load(open('server.json'))['version'])")
+        echo "server.json version: $SERVER_JSON_VERSION"
+        if [ "$PYPROJECT_VERSION" = "$CONST_VERSION" ] && [ "$PYPROJECT_VERSION" = "$SERVER_JSON_VERSION" ]; then
           echo "All versions are consistent: $PYPROJECT_VERSION"
         else
           echo "Version mismatch detected!"
           echo "pyproject.toml: $PYPROJECT_VERSION"
-          echo "__init__.py: $INIT_VERSION"
+          echo "constants.py: $CONST_VERSION"
+          echo "server.json: $SERVER_JSON_VERSION"
           exit 1
         fi
         if [[ "${GITHUB_REF}" == refs/tags/* ]]; then

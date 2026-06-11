@@ -8,7 +8,7 @@ mcp-name: io.github.4R9UN/mcp-kql-server
 
 A Model Context Protocol (MCP) server that transforms natural language questions into optimized KQL queries with intelligent schema discovery, AI-powered caching, and seamless Azure Data Explorer integration. Simply ask questions in plain English and get instant, accurate KQL queries with context-aware results.
 
-**Latest Version: v2.1.3** - FastMCP v2 and v3 compatibility range, faster MCP startup, deferred Azure CLI auth, optional update checks, shared streamable HTTP transport, and SQLite concurrency hardening for multiple local MCP instances.
+**Latest Version: v2.1.4** - Canonical schema type normalization for sharper NL2KQL accuracy, credential redaction in logs, leaner dependencies, and a single-source package version.
 
 <!-- Badges Section -->
 

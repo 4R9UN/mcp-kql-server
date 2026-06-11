@@ -2,6 +2,36 @@
 
 ---
 
+## 🚀 **v2.1.4 - NL2KQL Accuracy, Schema Type Normalization & Log Redaction**
+
+> **Sharpens NL2KQL generation accuracy and hardens logging, with no changes to the public tool contract.**
+
+**Release Date**: June 11, 2026
+**Author**: Arjun Trivedi
+**Email**: arjuntrivedi42@yahoo.com
+**Repository**: https://github.com/4R9UN/mcp-kql-server
+
+### 🎯 **What's New in v2.1.4**
+
+#### **1. Canonical Schema Type Normalization (NL2KQL accuracy)**
+- Schema discovery now normalizes every column type to a single canonical KQL vocabulary (`datetime`, `string`, `bool`, `int`, `long`, `real`, `decimal`, `guid`, `timespan`, `dynamic`) via a new `normalize_kql_type()` helper.
+- Previously, different discovery paths stored inconsistent type spellings (e.g. `Int64` / `DateTime` / `System.String`), so data-type-aware generation (time filters, aggregations, grouping) silently missed columns. Generation now keys off consistent types, producing more accurate, optimized queries.
+- CSL `ColumnType`/`CslType` is preferred over the .NET `DataType` when both are present.
+
+#### **2. Credential Redaction in Logs**
+- New `redact_secrets()` helper masks `user:pass@host`, `password=`/`token:` pairs, and `Bearer <jwt>` tokens before any raw query or connection string is logged.
+
+#### **3. Leaner Dependencies & Single-Source Version**
+- Removed unused `scikit-learn` and `authlib` dependencies; pinned `pandas>=1.3.0,<3.0.0`.
+- The package version now has a single literal source (`constants.py`), re-exported by `__init__.py` and enforced for parity with `pyproject.toml` and `server.json` in CI.
+
+### 🔄 **Upgrade**
+```bash
+pip install --upgrade mcp-kql-server==2.1.4
+```
+
+---
+
 ## 🚀 **v2.1.3 - FastMCP Compatibility, Faster Startup & Shared HTTP Transport**
 
 > **Modernizes startup behavior and MCP client configuration while keeping the public tool contract stable.**
