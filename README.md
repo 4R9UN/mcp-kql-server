@@ -35,7 +35,6 @@ Watch a quick demo of the MCP KQL Server in action:
 
 [![MCP KQL Server Demo](https://img.youtube.com/vi/Ca-yuThJ3Vc/0.jpg)](https://www.youtube.com/watch?v=Ca-yuThJ3Vc)
 
-
 ## 🚀 Features
 
 - **`execute_kql_query`**:
