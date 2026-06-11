@@ -11,12 +11,15 @@ Email: arjuntrivedi42@yahoo.com
 
 import os
 import re
+import ntpath
+import posixpath
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-# Version information - Single source of truth from pyproject.toml
-__version__ = "2.1.2"
+# Version information - single source of truth for the package version.
+# Keep this in sync with pyproject.toml and server.json (CI enforces parity).
+__version__ = "2.1.4"
 VERSION = __version__
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
@@ -91,7 +94,7 @@ FASTAPI_HOST = "0.0.0.0"
 FASTAPI_PORT = 8000
 
 # Tool Configuration
-TOOL_KQL_EXECUTE_NAME = "kql_execute"
+TOOL_KQL_EXECUTE_NAME = "execute_kql_query"
 TOOL_KQL_EXECUTE_DESCRIPTION = """Execute KQL (Kusto Query Language) queries for Azure Data Explorer, Application Insights, Log Analytics, and other Kusto databases.
 
 **Use this tool when users ask about:**
@@ -114,6 +117,10 @@ TOOL_KQL_EXECUTE_DESCRIPTION = """Execute KQL (Kusto Query Language) queries for
 Supports both direct KQL execution and natural language to KQL conversion with intelligent schema detection."""
 
 TOOL_KQL_SCHEMA_NAME = "kql_schema_memory"
+REGISTERED_TOOL_NAMES = (
+    TOOL_KQL_EXECUTE_NAME,
+    TOOL_KQL_SCHEMA_NAME,
+)
 TOOL_KQL_SCHEMA_DESCRIPTION = """Discover database schemas, table structures, and generate KQL queries using AI-powered schema intelligence.
 
 **Use this tool when users need:**
@@ -447,6 +454,39 @@ KQL_CONVERSATIONAL_PENALTY = -0.5
 
 # Memory configuration - default memory path under %APPDATA%/KQL_MCP on Windows; fallback to user's home when not set
 DEFAULT_MEMORY_PATH = str(Path(os.environ.get("APPDATA", str(Path.home()))) / "KQL_MCP" / "kql_mcp_memory.json")
+
+
+def format_display_path(path: Any) -> str:
+    """Return a user-safe display path for logs and diagnostics.
+
+    Runtime paths can include a local profile directory. For user-facing output,
+    replace well-known profile roots with environment variable placeholders while
+    leaving the actual storage path unchanged.
+    """
+    path_text = str(path)
+    if not path_text:
+        return path_text
+
+    for env_name, placeholder in (
+        ("APPDATA", "%APPDATA%"),
+        ("LOCALAPPDATA", "%LOCALAPPDATA%"),
+        ("USERPROFILE", "%USERPROFILE%"),
+        ("HOME", "~"),
+    ):
+        env_value = os.environ.get(env_name)
+        if not env_value:
+            continue
+        for path_module, separator in ((os.path, os.sep), (ntpath, "\\"), (posixpath, "/")):
+            normalized_path = path_module.normcase(path_module.normpath(path_text))
+            normalized_env = path_module.normcase(path_module.normpath(env_value))
+            if normalized_path == normalized_env:
+                return placeholder
+            if normalized_path.startswith(normalized_env + separator):
+                suffix = path_module.normpath(path_text)[len(path_module.normpath(env_value)):].lstrip("\\/")
+                display_separator = "\\" if "\\" in path_text else "/"
+                return f"{placeholder}{display_separator}{suffix}" if suffix else placeholder
+
+    return path_text
 
 # Query execution configuration
 DEFAULT_MAX_RETRIES = 3

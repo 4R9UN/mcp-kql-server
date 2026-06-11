@@ -8,7 +8,7 @@ mcp-name: io.github.4R9UN/mcp-kql-server
 
 A Model Context Protocol (MCP) server that transforms natural language questions into optimized KQL queries with intelligent schema discovery, AI-powered caching, and seamless Azure Data Explorer integration. Simply ask questions in plain English and get instant, accurate KQL queries with context-aware results.
 
-**Latest Version: v2.1.2** - Hardcoded 10-minute Kusto `servertimeout`, ADX-side dry-run validation for generated queries, schema-drift recovery loop, and fully schema-driven NL2KQL with no hardcoded table or column names.
+**Latest Version: v2.1.4** - Canonical schema type normalization for sharper NL2KQL accuracy, credential redaction in logs, leaner dependencies, and a single-source package version.
 
 <!-- Badges Section -->
 
@@ -44,7 +44,7 @@ Watch a quick demo of the MCP KQL Server in action:
     - **Strict Schema Validation**: Uses discovered schema memory and validation before execution.
     - **Schema-Grounded Repair**: Repairs invalid columns only when a valid table schema can prove the replacement.
 
-- **`schema_memory`**:
+- **`kql_schema_memory`**:
     - **Schema Discovery**: Discover and cache schemas for tables.
     - **Database Exploration**: List all tables within a database.
     - **AI Context**: Get ranked CAG context for tables, with optional table-scoped strict schema output.
@@ -175,7 +175,7 @@ Add to your Claude Desktop MCP settings file (`mcp_settings.json`):
 ```json
 {
   "mcpServers": {
-    "mcp-kql-server": {
+    "mcpKqlServer": {
       "type": "stdio",
       "command": "python",
       "args": ["-m", "mcp_kql_server"]
@@ -187,11 +187,11 @@ Add to your Claude Desktop MCP settings file (`mcp_settings.json`):
 <details>
 <summary>Alternatives: platform-stable launchers or the installed console script</summary>
 
-Windows (the `py` launcher always lives at `C:\Windows\py.exe`):
+Windows (the `py` launcher is commonly available as `py`; use `Get-Command py` if you need its full path):
 ```json
 {
   "mcpServers": {
-    "mcp-kql-server": {
+    "mcpKqlServer": {
       "type": "stdio",
       "command": "py",
       "args": ["-3", "-m", "mcp_kql_server"]
@@ -201,18 +201,6 @@ Windows (the `py` launcher always lives at `C:\Windows\py.exe`):
 ```
 On macOS / Linux replace `"py"` with `"python3"` and drop the `"-3"` arg.
 
-Or use the console script that `pip install` drops on `PATH`:
-```json
-{
-  "mcpServers": {
-    "mcp-kql-server": {
-      "type": "stdio",
-      "command": "mcp-kql-server",
-      "args": []
-    }
-  }
-}
-```
 </details>
 
 ### VSCode (with MCP Extension)
@@ -227,16 +215,69 @@ Add to your VSCode MCP configuration:
 ```json
 {
   "servers": {
-    "mcp-kql-server": {
+    "mcpKqlServer": {
       "type": "stdio",
-      "command": "python",
-      "args": ["-m", "mcp_kql_server"]
+      "command": "py",
+      "args": ["-3", "-m", "mcp_kql_server", "--transport", "stdio"],
+      "timeout": 300000,
+      "env": {
+        "FASTMCP_TRANSPORT": "stdio",
+        "MCP_KQL_AUTH_ON_STARTUP": "false",
+        "MCP_KQL_CHECK_FOR_UPDATES": "false",
+        "MCP_KQL_DEFER_AUTH": "1",
+        "MCP_KQL_SKIP_STARTUP_VERSION_CHECK": "1",
+        "MCP_KQL_AUTH_CHECK_TIMEOUT_SECONDS": "10",
+        "MCP_KQL_AUTH_LOGIN_TIMEOUT_SECONDS": "120",
+        "MCP_KQL_SQLITE_BUSY_TIMEOUT_MS": "30000"
+      }
     }
   }
 }
 ```
 
 > **If VS Code logs `spawn ...PythonNNN/python.exe ENOENT`**, the Python extension is substituting a cached interpreter path for `"python"`. Switch to `"py"` (Windows) / `"python3"` (macOS/Linux), or to the `"mcp-kql-server"` console script that `pip install` drops on `PATH`. See [docs/troubleshooting.md](docs/troubleshooting.md#8-mcp-integration-issues) for full details.
+
+> **Windows tip**: use `py -3 -m mcp_kql_server` so VS Code does not need a user-specific Python path. If you must use a full path locally, keep it in your private `mcp.json`, not in shared documentation.
+
+> **If the server starts but VS Code still shows no tools**, run `MCP: Reset Cached Tools`, then `MCP: Reset Trust`, and restart the server from `MCP: List Servers`. VS Code stores trust and cached tools separately from `mcp.json`, so a previous failed launch can keep the old empty state until you reset it.
+
+### Shared HTTP Mode for Multiple MCP Clients
+
+Use shared HTTP when VS Code, GitHub Copilot CLI, agents, or other MCP clients should connect to one persistent MCP KQL server process.
+
+Start the server:
+
+```bash
+python -m mcp_kql_server --transport http --host 127.0.0.1 --port 8000 --http-path /mcp --stateless-http
+```
+
+Client configuration:
+
+```json
+{
+  "servers": {
+    "mcpKqlServer": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+### Runtime Settings Added in v2.1.3
+
+| Option or environment variable | Purpose | Default |
+| --- | --- | --- |
+| `--transport`, `FASTMCP_TRANSPORT` | `stdio`, `http`, `streamable-http`, or `sse` | `stdio` |
+| `--host`, `FASTMCP_HOST` | HTTP bind host | `127.0.0.1` |
+| `--port`, `FASTMCP_PORT` | HTTP bind port | `8000` |
+| `--http-path`, `FASTMCP_STREAMABLE_HTTP_PATH` | Streamable HTTP endpoint path | `/mcp` |
+| `--stateless-http`, `FASTMCP_STATELESS_HTTP` | Stateless HTTP mode for shared deployments | `false` |
+| `--auth-on-startup`, `MCP_KQL_AUTH_ON_STARTUP` | Check Azure CLI auth before startup | `false` |
+| `--check-updates`, `MCP_KQL_CHECK_FOR_UPDATES` | Check PyPI for package updates before startup | `false` |
+| `MCP_KQL_AUTH_CHECK_TIMEOUT_SECONDS` | Azure CLI auth check timeout | `10` |
+| `MCP_KQL_AUTH_LOGIN_TIMEOUT_SECONDS` | Interactive Azure login timeout | `120` |
+| `MCP_KQL_SQLITE_BUSY_TIMEOUT_MS` | SQLite busy timeout for concurrent local MCP instances | `30000` |
 
 ### Roo-code Or Cline (VS-code Extentions)
 
@@ -271,9 +312,12 @@ python3 -m mcp_kql_server   # macOS / Linux
 # Equivalent console script installed by pip
 mcp-kql-server
 
+# Shared HTTP mode for multiple clients
+python -m mcp_kql_server --transport http --host 127.0.0.1 --port 8000 --http-path /mcp --stateless-http
+
 # Server provides these tools:
 # - execute_kql_query: Execute KQL or generate KQL from natural language
-# - schema_memory: Discover, cache, and inspect cluster schemas
+# - kql_schema_memory: Discover, cache, and inspect cluster schemas
 ```
 ## 🔧 Quick Start
 
@@ -289,17 +333,24 @@ az login
 python -m mcp_kql_server
 ```
 
+To inspect the installed server version and runtime defaults:
+
+```bash
+python -m mcp_kql_server --info --json
+```
+
 The server starts immediately with:
 - 📁 **Auto-created memory path**: `%APPDATA%\KQL_MCP\cluster_memory`
 - 🔧 **Optimized defaults**: No configuration files needed
 - 🔐 **Secure setup**: Uses your existing Azure CLI credentials
+- ⚡ **Fast startup**: Auth and update checks are deferred unless explicitly enabled
 
 ### 3. Use via MCP Client
 
 The server provides two main tools:
 
 > #### `execute_kql_query` - Execute KQL queries or generate KQL from natural language
-> #### `schema_memory` - Discover, refresh, and inspect cached cluster schemas
+> #### `kql_schema_memory` - Discover, refresh, and inspect cached cluster schemas
 
 
 ## 💡 Usage Examples
@@ -396,7 +447,7 @@ graph LR
     end
     
     %% Client to Server
-    Client ==>|"📡 MCP Protocol<br/>STDIO/SSE"| FastMCP
+    Client ==>|"📡 MCP Protocol<br/>stdio or streamable HTTP"| FastMCP
     
     %% Server to Azure
     Executor ==>|"🔍 Execute KQL<br/>Query & Analyze"| ADX

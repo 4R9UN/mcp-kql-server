@@ -2,6 +2,84 @@
 
 ---
 
+## 🚀 **v2.1.4 - NL2KQL Accuracy, Schema Type Normalization & Log Redaction**
+
+> **Sharpens NL2KQL generation accuracy and hardens logging, with no changes to the public tool contract.**
+
+**Release Date**: June 11, 2026
+**Author**: Arjun Trivedi
+**Email**: arjuntrivedi42@yahoo.com
+**Repository**: https://github.com/4R9UN/mcp-kql-server
+
+### 🎯 **What's New in v2.1.4**
+
+#### **1. Canonical Schema Type Normalization (NL2KQL accuracy)**
+- Schema discovery now normalizes every column type to a single canonical KQL vocabulary (`datetime`, `string`, `bool`, `int`, `long`, `real`, `decimal`, `guid`, `timespan`, `dynamic`) via a new `normalize_kql_type()` helper.
+- Previously, different discovery paths stored inconsistent type spellings (e.g. `Int64` / `DateTime` / `System.String`), so data-type-aware generation (time filters, aggregations, grouping) silently missed columns. Generation now keys off consistent types, producing more accurate, optimized queries.
+- CSL `ColumnType`/`CslType` is preferred over the .NET `DataType` when both are present.
+
+#### **2. Credential Redaction in Logs**
+- New `redact_secrets()` helper masks `user:pass@host`, `password=`/`token:` pairs, and `Bearer <jwt>` tokens before any raw query or connection string is logged.
+
+#### **3. Leaner Dependencies & Single-Source Version**
+- Removed unused `scikit-learn` and `authlib` dependencies; pinned `pandas>=1.3.0,<3.0.0`.
+- The package version now has a single literal source (`constants.py`), re-exported by `__init__.py` and enforced for parity with `pyproject.toml` and `server.json` in CI.
+
+### 🔄 **Upgrade**
+```bash
+pip install --upgrade mcp-kql-server==2.1.4
+```
+
+---
+
+## 🚀 **v2.1.3 - FastMCP Compatibility, Faster Startup & Shared HTTP Transport**
+
+> **Modernizes startup behavior and MCP client configuration while keeping the public tool contract stable.**
+
+**Release Date**: May 9, 2026
+**Author**: Arjun Trivedi
+**Email**: arjuntrivedi42@yahoo.com
+**Repository**: https://github.com/4R9UN/mcp-kql-server
+
+### 🚀 **What's New in v2.1.3**
+
+#### **1. Faster MCP Startup**
+- `sentence_transformers` is now imported lazily, only when semantic embeddings are needed.
+- Startup update checks are opt in via `--check-updates` or `MCP_KQL_CHECK_FOR_UPDATES=true`.
+- Azure CLI auth is deferred by default so MCP tool discovery does not block on interactive login.
+
+#### **2. FastMCP Compatibility**
+- Runtime dependency range is now `fastmcp>=2.14.7,<4.0.0`.
+- Transport settings are passed through `mcp.run(...)`, which is compatible with FastMCP v2 and v3 patterns.
+- Latest FastMCP v3 import compatibility was validated in an isolated environment.
+
+#### **3. Shared HTTP Transport**
+- Added CLI and environment support for `stdio`, `http`, `streamable-http`, and `sse` transports.
+- `http` is normalized to modern streamable HTTP.
+- `--stateless-http` supports shared or multi worker deployments.
+
+#### **4. Multi Instance Local Memory**
+- SQLite connections now use WAL mode, `synchronous=NORMAL`, and `MCP_KQL_SQLITE_BUSY_TIMEOUT_MS`.
+- This reduces database lock failures when multiple stdio MCP instances share the same memory DB.
+
+#### **5. Documentation Cleanup**
+- README was simplified and now focuses on install, MCP settings, shared HTTP mode, runtime options, tools, security, and troubleshooting.
+- Removed noisy diagrams, repeated release details, demo clutter, and stale configuration snippets from the main README.
+
+### 🛡️ **Compatibility**
+
+- Public MCP tool names and return contract remain unchanged.
+- Stdio remains the default transport.
+- Shared HTTP mode is additive.
+
+### 📦 **Install**
+
+```bash
+pip install --upgrade mcp-kql-server==2.1.3
+```
+
+---
+
 ## 📝 **Documentation update — recommended MCP launch command**
 
 The recommended MCP client configuration now uses the Python module entry point:
@@ -61,7 +139,7 @@ This release focuses on execution reliability and NL2KQL accuracy. No new depend
 
 ### 🛡️ **Compatibility**
 
-- Public tool contract for `execute_kql_query` and `schema_memory` is unchanged.
+- Public tool contract for `execute_kql_query` and `kql_schema_memory` is unchanged.
 - The new `error_class` field is additive on error responses.
 - No new runtime dependencies. `ClientRequestProperties` is already shipped by `azure-kusto-data`.
 
@@ -90,7 +168,7 @@ This release focuses on correctness and schema fidelity. The server now prefers 
 
 #### **1. Stricter CAG and Schema Memory Usage**
 - **Schema-First Generation**: NL2KQL generation now uses ranked table and column context from schema memory before building candidate queries.
-- **Strict Table Context**: `schema_memory(operation="get_context")` can now be scoped to a specific table and returns:
+- **Strict Table Context**: `kql_schema_memory(operation="get_context")` can now be scoped to a specific table and returns:
   - allowed columns
   - recommended columns
   - preferred time column
@@ -104,7 +182,7 @@ This release focuses on correctness and schema fidelity. The server now prefers 
 
 #### **3. Cache and Runtime Stability**
 - **Scoped Query Cache**: Cached results are now isolated by query text, cluster, database, and cache namespace.
-- **Safe Cache Clearing**: `schema_memory(operation="clear_cache")` now clears real cached state rather than only returning a success message.
+- **Safe Cache Clearing**: `kql_schema_memory(operation="clear_cache")` now clears real cached state rather than only returning a success message.
 - **Shared Connection Pooling**: Execution paths now use the shared pool instead of a duplicate local client cache path.
 - **Safer Health Checks**: Pool health checks probe only with a registered database and avoid false recycling when no database context exists.
 

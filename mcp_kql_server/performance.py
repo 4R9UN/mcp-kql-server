@@ -9,7 +9,7 @@ This module provides:
 - Health monitoring for connections
 
 Author: Arjun Trivedi
-Version: 2.1.1
+Email: arjuntrivedi42@yahoo.com
 """
 
 import asyncio

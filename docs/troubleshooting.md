@@ -1,6 +1,6 @@
 # Troubleshooting Guide - MCP KQL Server
 
-**Version**: 2.1.2
+**Version**: 2.1.4
 **Last Updated**: December 2025
 
 ---
@@ -226,12 +226,12 @@ for dep in deps:
 
 2. **Refresh schema cache:**
    ```text
-   schema_memory(operation="refresh_schema", cluster_url="...", database="...")
+   kql_schema_memory(operation="refresh_schema", cluster_url="...", database="...")
    ```
 
 3. **Use schema memory tool:**
    ```
-   schema_memory(operation="discover", cluster_url="...", database="...", table_name="...")
+   kql_schema_memory(operation="discover", cluster_url="...", database="...", table_name="...")
    ```
 
 ---
@@ -246,7 +246,7 @@ for dep in deps:
 1. **List available tables:**
    ```python
    # Via MCP tool
-   schema_memory(operation="list_tables", cluster_url="...", database="...")
+   kql_schema_memory(operation="list_tables", cluster_url="...", database="...")
    ```
 
 2. **Check table name case sensitivity:**
@@ -329,12 +329,12 @@ for dep in deps:
 
 1. **Force schema refresh:**
    ```text
-   schema_memory(operation="refresh_schema", cluster_url="...", database="...")
+   kql_schema_memory(operation="refresh_schema", cluster_url="...", database="...")
    ```
 
 2. **Use refresh_schema operation:**
    ```
-   schema_memory(operation="refresh_schema", cluster_url="...", database="...")
+   kql_schema_memory(operation="refresh_schema", cluster_url="...", database="...")
    ```
 
 ---
@@ -354,7 +354,7 @@ for dep in deps:
 
 1. **Request strict table-scoped context before generating KQL:**
    ```
-   schema_memory(
+   kql_schema_memory(
      operation="get_context",
      cluster_url="...",
      database="...",
@@ -411,7 +411,7 @@ for dep in deps:
 
 2. **Rediscover schemas to generate embeddings:**
    ```python
-   schema_memory(operation="discover", cluster_url="...", database="...", table_name="TableName")
+   kql_schema_memory(operation="discover", cluster_url="...", database="...", table_name="TableName")
    ```
 
 3. **Check sentence-transformers installation:**
@@ -540,15 +540,15 @@ for dep in deps:
 
 **Cause:** The VS Code Python extension intercepts a bare `"command": "python"` and substitutes its **cached selected interpreter** path. If that interpreter was uninstalled or upgraded, the spawn fails. `pip install` cannot prevent this; the path is stored by VS Code, not derived from `PATH`.
 
-**Fix (preferred):** invoke through the platform-stable launcher so the spawn cannot be hijacked by the Python extension's cached interpreter:
+**Fix (preferred):** invoke through the platform-stable launcher so the spawn cannot be hijacked by the Python extension's cached interpreter. On Windows, run `Get-Command py` if you need the full launcher path:
 
 ```json
 {
     "servers": {
-        "mcp-kql-server": {
+      "mcpKqlServer": {
             "type": "stdio",
-            "command": "python",
-            "args": ["-m", "mcp_kql_server"]
+         "command": "py",
+         "args": ["-3", "-m", "mcp_kql_server"]
         }
     }
 }
@@ -559,7 +559,7 @@ for dep in deps:
 ```json
 {
     "servers": {
-        "mcp-kql-server": {
+   "mcpKqlServer": {
             "type": "stdio",
             "command": "mcp-kql-server",
             "args": []
@@ -569,6 +569,21 @@ for dep in deps:
 ```
 
 Do **not** use the bare string `"python"` on Windows when the VS Code Python extension is installed.
+
+### Problem: VS Code starts the server but shows no KQL tools
+
+**Symptom:** Running `python -m mcp_kql_server` works, and a protocol probe returns `execute_kql_query` and `kql_schema_memory`, but the VS Code tool picker stays empty.
+
+**Cause:** VS Code stores MCP trust decisions and cached tool lists separately from `mcp.json`. If the server previously failed with a stale Python path, VS Code can keep the old empty discovery state until the cache is reset.
+
+**Fix:**
+
+1. Run `MCP: Reset Cached Tools` from the Command Palette.
+2. Run `MCP: Reset Trust` from the Command Palette.
+3. Run `MCP: List Servers`, choose `mcpKqlServer`, then choose restart.
+4. Open the KQL server output log and confirm it lists `execute_kql_query` and `kql_schema_memory`.
+
+Using a camelCase key such as `mcpKqlServer` also follows VS Code naming guidance and forces fresh discovery if the old `mcp-kql-server` entry had stale failed state.
 
 ### Problem: Server not detected by Claude
 

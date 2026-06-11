@@ -5,6 +5,7 @@ Clean server with 2 main tools and single authentication
 Author: Arjun Trivedi
 Email: arjuntrivedi42@yahoo.com
 """
+# pylint: disable=broad-exception-caught,unused-argument
 
 import json
 import logging
@@ -22,10 +23,13 @@ os.environ["FASTMCP_NO_BANNER"] = "1"
 os.environ["FASTMCP_SUPPRESS_BRANDING"] = "1"
 os.environ["NO_COLOR"] = "1"
 
-from fastmcp import FastMCP # pylint: disable=wrong-import-position
+from fastmcp import FastMCP
 
 from .constants import (
     SERVER_NAME,
+    REGISTERED_TOOL_NAMES,
+    TOOL_KQL_EXECUTE_NAME,
+    TOOL_KQL_SCHEMA_NAME,
     __version__,
 )
 from .execute_kql import (
@@ -38,11 +42,20 @@ from .memory import get_memory_manager
 from .utils import (
     bracket_if_needed, SchemaManager, ErrorHandler,
     extract_cluster_and_database_from_query,
+    redact_secrets,
 )
 from .kql_auth import authenticate_kusto
 from .kql_validator import KQLValidator
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 # Server-level instructions surfaced to MCP clients (Claude, VS Code, Cursor, ...)
 # in their tool-discovery UI. Keep concise and action-oriented; LLMs use this to
@@ -104,6 +117,15 @@ kql_validator = KQLValidator(memory_manager, schema_manager)
 
 # Global kusto manager - will be set at startup
 kusto_manager_global = None
+
+
+def _ensure_kusto_authenticated() -> Dict[str, Any]:
+    """Perform a lazy, non-interactive Azure CLI auth check."""
+    global kusto_manager_global  # pylint: disable=global-statement
+    if isinstance(kusto_manager_global, dict) and kusto_manager_global.get("authenticated"):
+        return kusto_manager_global
+    kusto_manager_global = authenticate_kusto(interactive=False)
+    return kusto_manager_global
 
 GENERATION_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "by", "find", "for", "from", "get",
@@ -626,7 +648,7 @@ def _build_safe_repair_query(
 
 
 @mcp.tool(
-    name="execute_kql_query",
+    name=TOOL_KQL_EXECUTE_NAME,
     title="Execute KQL Query (Azure Data Explorer / Kusto)",
     annotations={
         # Direct queries are read-only; .ingest/.drop management commands are rare
@@ -694,11 +716,13 @@ async def execute_kql_query(
     """
     try:
         repaired_query_info = None
-        if not kusto_manager_global or not kusto_manager_global.get("authenticated"):
+        auth_status = _ensure_kusto_authenticated()
+        if not auth_status or not auth_status.get("authenticated"):
             return json.dumps({
                 "success": False,
                 "error": "Authentication required",
-                "suggestions": ["Run 'az login' to authenticate"]
+                "auth_status": auth_status,
+                "suggestions": ["Run 'az login' in a terminal, then retry the tool call"]
             })
 
         # If caller did not pass cluster/database, try to recover them from any
@@ -875,21 +899,21 @@ async def execute_kql_query(
                 if "database" in error_str and ("not found" in error_str or "kind" in error_str):
                     suggestions.extend([
                         f"Database '{database}' was not found on cluster '{cluster_url}'",
-                        "Run schema_memory(operation='list_tables', cluster_url=<cluster>, database=<db>) to confirm the database name",
+                        "Run kql_schema_memory(operation='list_tables', cluster_url=<cluster>, database=<db>) to confirm the database name",
                         "Use '.show databases' as a KQL query to list available databases on the cluster",
                     ])
                 # Table/Column not found errors (SEM0100)
                 elif "sem0100" in error_str or "failed to resolve" in error_str:
                     suggestions.extend([
                         "One or more column names don't exist in the table schema",
-                        "Run schema_memory(operation='discover', table_name='<table>') to refresh schema",
+                        "Run kql_schema_memory(operation='discover', table_name='<table>') to refresh schema",
                         "Check column names using: TableName | getschema"
                     ])
                 # Unknown table errors
                 elif "unknown" in error_str and "table" in error_str:
                     suggestions.extend([
                         "Table name may be incorrect",
-                        "Run: schema_memory(operation='list_tables') to see available tables",
+                        "Run: kql_schema_memory(operation='list_tables') to see available tables",
                         "Check if you need to use bracket notation: ['TableName']"
                     ])
                 else:
@@ -911,7 +935,7 @@ async def execute_kql_query(
                 return json.dumps(result, indent=2)
 
         if df is None or df.empty:
-            logger.info("Query returned empty result (no rows) for: %s...", query[:100])
+            logger.info("Query returned empty result (no rows) for: %s...", redact_secrets(query[:100]))
             result = {
                 "success": True,
                 "error": None,
@@ -1065,7 +1089,7 @@ async def _generate_kql_from_natural_language(
                     "success": False,
                     "error": f"No schema found for {SPECIAL_TOKENS['TABLE_START']}{table_name}{SPECIAL_TOKENS['TABLE_END']} in memory.",
                     "query": "",
-                    "suggestion": f"Run: schema_memory(operation='discover', cluster_url='{cluster_url}', database='{database}', table_name='{table_name}')",
+                    "suggestion": f"Run: kql_schema_memory(operation='discover', cluster_url='{cluster_url}', database='{database}', table_name='{table_name}')",
                 }
 
             explicit_table = {
@@ -1099,7 +1123,7 @@ async def _generate_kql_from_natural_language(
                 "success": False,
                 "error": f"{SPECIAL_TOKENS['CLUSTER_START']}ERROR{SPECIAL_TOKENS['CLUSTER_END']} Could not determine a relevant table from schema memory.",
                 "query": "",
-                "suggestion": "Use schema_memory(operation='list_tables') or pass table_name explicitly before generating queries.",
+                "suggestion": "Use kql_schema_memory(operation='list_tables') or pass table_name explicitly before generating queries.",
             }
 
         validated_candidates = []
@@ -1272,7 +1296,7 @@ async def _generate_kql_from_natural_language(
 
 
 @mcp.tool(
-    name="kql_schema_memory",
+    name=TOOL_KQL_SCHEMA_NAME,
     title="KQL Schema Memory & Discovery (Kusto)",
     annotations={
         "readOnlyHint": True,
@@ -1323,13 +1347,15 @@ async def schema_memory(
     Authentication: Requires `az login` first.
     """
     try:
-        if not kusto_manager_global or not kusto_manager_global.get("authenticated"):
+        auth_status = _ensure_kusto_authenticated()
+        if not auth_status or not auth_status.get("authenticated"):
             return json.dumps({
                 "success": False,
                 "error": "Authentication required",
+                "auth_status": auth_status,
                 "suggestions": [
                     "Ensure Azure CLI is installed and authenticated",
-                    "Run 'az login' to authenticate",
+                    "Run 'az login' in a terminal, then retry the tool call",
                     "Check your Azure permissions"
                 ]
             })
@@ -1694,7 +1720,7 @@ async def _schema_list_tables_operation(cluster_url: str, database: str) -> str:
             "tables": tables,
             "table_tokens": table_tokens,
             "count": len(tables),
-            "note": f"{SPECIAL_TOKENS['AI_START']}Use schema_memory(operation='discover', table_name='<table>') to get column details{SPECIAL_TOKENS['AI_END']}"
+            "note": f"{SPECIAL_TOKENS['AI_START']}Use kql_schema_memory(operation='discover', table_name='<table>') to get column details{SPECIAL_TOKENS['AI_END']}"
         }, indent=2)
     except (ValueError, RuntimeError, OSError) as e:
         return json.dumps({
@@ -2039,10 +2065,10 @@ def _print_info(as_json: bool = False) -> None:
         tools_info = []
     if not tools_info:
         tools_info = [
-            {"name": "execute_kql_query",
+            {"name": TOOL_KQL_EXECUTE_NAME,
              "title": "Execute KQL Query (Azure Data Explorer / Kusto)",
              "summary": "Run KQL on Kusto and return results. Supports NL2KQL via generate_query=true."},
-            {"name": "kql_schema_memory",
+            {"name": TOOL_KQL_SCHEMA_NAME,
              "title": "KQL Schema Memory & Discovery (Kusto)",
              "summary": "Discover, cache and explore Kusto schema. Operations: list_tables, discover, get_context, refresh_schema, get_stats, clear_cache, generate_report, cache_stats, cleanup_cache, list_multi_cluster_tables."},
         ]
@@ -2053,7 +2079,7 @@ def _print_info(as_json: bool = False) -> None:
         "mcp_protocol_version": C.MCP_PROTOCOL_VERSION,
         "transport": "stdio (FastMCP)",
         "auth": "Azure CLI (az login). No secrets stored.",
-        "memory_path": C.DEFAULT_MEMORY_PATH,
+        "memory_path": C.format_display_path(C.DEFAULT_MEMORY_PATH),
         "default_kusto_domain": C.DEFAULT_KUSTO_DOMAIN,
         "connection_timeout_sec": C.DEFAULT_CONNECTION_TIMEOUT,
         "query_timeout_sec": C.DEFAULT_QUERY_TIMEOUT,
@@ -2125,6 +2151,46 @@ def main():
         "--json", action="store_true",
         help="With --info, emit machine-readable JSON instead of text.",
     )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http", "streamable-http", "sse"],
+        default=os.environ.get("FASTMCP_TRANSPORT", "stdio"),
+        help="Transport for FastMCP. Defaults to stdio; use http for a shared server.",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("FASTMCP_HOST", "127.0.0.1"),
+        help="Host for HTTP transports.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("FASTMCP_PORT", "8000")),
+        help="Port for HTTP transports.",
+    )
+    parser.add_argument(
+        "--http-path",
+        default=os.environ.get("FASTMCP_STREAMABLE_HTTP_PATH", "/mcp"),
+        help="Path for streamable HTTP transport.",
+    )
+    parser.add_argument(
+        "--stateless-http",
+        action="store_true",
+        default=_env_flag("FASTMCP_STATELESS_HTTP", False),
+        help="Run HTTP transport in stateless mode for multi-worker deployments.",
+    )
+    parser.add_argument(
+        "--auth-on-startup",
+        action="store_true",
+        default=_env_flag("MCP_KQL_AUTH_ON_STARTUP", False),
+        help="Check Azure CLI auth before starting. Disabled by default for faster MCP discovery.",
+    )
+    parser.add_argument(
+        "--check-updates",
+        action="store_true",
+        default=_env_flag("MCP_KQL_CHECK_FOR_UPDATES", False),
+        help="Check PyPI for mcp-kql-server updates at startup. Disabled by default.",
+    )
 
     args = parser.parse_args()
 
@@ -2141,34 +2207,52 @@ def main():
     logger.info("MCP KQL Server v%s", get_current_version())
     logger.info("=" * 60)
 
-    # Check for updates at startup (non-blocking, with short timeout)
-    try:
-        update_available, update_msg = startup_version_check(auto_update=False, silent=False)
-        if update_available:
-            logger.info("-" * 60)
-            logger.info("UPDATE AVAILABLE: %s", update_msg)
-            logger.info("Run: pip install --upgrade mcp-kql-server")
-            logger.info("-" * 60)
-    except Exception as e:
-        logger.debug("Version check skipped: %s", e)
+    if args.check_updates:
+        try:
+            update_available, update_msg = startup_version_check(auto_update=False, silent=False)
+            if update_available:
+                logger.info("-" * 60)
+                logger.info("UPDATE AVAILABLE: %s", update_msg)
+                logger.info("Run: pip install --upgrade mcp-kql-server")
+                logger.info("-" * 60)
+        except (RuntimeError, OSError, ValueError, TypeError) as e:
+            logger.debug("Version check skipped: %s", e)
+    else:
+        logger.info("[OK] Startup update check disabled")
 
     try:
-        # Single authentication at startup
-        kusto_manager_global = authenticate_kusto()
+        if args.auth_on_startup:
+            kusto_manager_global = authenticate_kusto(interactive=False)
+        else:
+            kusto_manager_global = {"authenticated": False, "message": "Auth check deferred until first Kusto tool call"}
 
-        if kusto_manager_global["authenticated"]:
+        if kusto_manager_global.get("authenticated"):
             logger.info("[OK] Authentication successful")
             logger.info("[OK] MCP KQL Server ready")
         else:
-            logger.warning("[WARN] Authentication failed - some operations may not work")
-            logger.info("[OK] MCP KQL Server starting in limited mode")
+            logger.info("[OK] Authentication deferred. Run 'az login' before executing KQL.")
+            logger.info("[OK] MCP KQL Server ready")
 
         # Log available tools
-        logger.info("Available tools: execute_kql_query, schema_memory")
+        logger.info("Available tools: %s", ", ".join(REGISTERED_TOOL_NAMES))
         logger.info("=" * 60)
 
-        # Use FastMCP's built-in stdio transport
-        mcp.run()
+        transport = (args.transport or "stdio").strip().lower()
+        if transport == "http":
+            transport = "streamable-http"
+
+        run_kwargs: Dict[str, Any] = {"show_banner": False}
+        if transport in {"streamable-http", "sse"}:
+            run_kwargs.update({
+                "host": args.host,
+                "port": args.port,
+                "stateless_http": args.stateless_http,
+            })
+            if transport == "streamable-http":
+                run_kwargs["path"] = args.http_path
+
+        logger.info("Starting FastMCP transport=%s", transport)
+        mcp.run(transport=transport, **run_kwargs)
     except (RuntimeError, OSError, ImportError) as e:
         logger.error("[ERROR] Failed to start server: %s", e)
 

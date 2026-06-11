@@ -35,6 +35,7 @@ from .utils import (
     extract_tables_from_query,
     generate_query_description,
     normalize_cluster_uri,
+    redact_secrets,
     retry_on_exception
 )
 
@@ -289,7 +290,7 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, timeo
     crp = _build_request_properties(timeout, kql_query)
     logger.info(
         "Executing KQL on %s/%s [request_id=%s timeout=%ss]: %s...",
-        cluster_url, database, crp.client_request_id, _clamp_timeout(timeout), kql_query[:150],
+        cluster_url, database, crp.client_request_id, _clamp_timeout(timeout), redact_secrets(kql_query[:150]),
     )
 
     get_connection_pool().register_health_check_database(cluster_url, database)
@@ -453,7 +454,7 @@ def kql_execute_tool(kql_query: str, cluster_uri: Optional[str] = None, database
 
     except (ValueError, TypeError, RuntimeError, AttributeError) as e:
         logger.error("kql_execute_tool failed pre-execution: %s", e)
-        logger.error("Original query was: %s", kql_query if 'kql_query' in locals() else 'Unknown')
+        logger.error("Original query was: %s", redact_secrets(kql_query) if 'kql_query' in locals() else 'Unknown')
         raise  # Re-raise instead of returning empty DataFrame
 
 
