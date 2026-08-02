@@ -6,10 +6,16 @@ Email: arjuntrivedi42@yahoo.com
 """
 
 import subprocess
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-from mcp_kql_server.kql_auth import authenticate, kql_auth, trigger_az_cli_auth
+from mcp_kql_server.kql_auth import (
+    authenticate,
+    build_kusto_connection_string,
+    kql_auth,
+    trigger_az_cli_auth,
+)
 
 
 class TestKQLAuth(unittest.TestCase):
@@ -33,13 +39,9 @@ class TestKQLAuth(unittest.TestCase):
     @patch("mcp_kql_server.kql_auth.subprocess.run")
     def test_kql_auth_failure(self, mock_run):
         """Test failed authentication check."""
-        # Mock first call success, second call failure
-        mock_run.side_effect = [
-            MagicMock(returncode=0),  # for 'az config'
-            subprocess.CalledProcessError(
-                1, "az", stderr="Authentication failed"
-            ),  # for 'az account'
-        ]
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, "az", stderr="Authentication failed"
+        )
 
         result = kql_auth()
 
@@ -60,13 +62,22 @@ class TestKQLAuth(unittest.TestCase):
     @patch("mcp_kql_server.kql_auth.subprocess.run")
     def test_trigger_az_cli_auth_success(self, mock_run):
         """Test successful Azure CLI authentication trigger."""
-        # Mock successful login
-        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stderr=""),
+            MagicMock(returncode=0, stdout="{}", stderr=""),
+        ]
 
         result = trigger_az_cli_auth()
 
         self.assertTrue(result["authenticated"])
         self.assertIn("successful", result["message"].lower())
+        login_call = mock_run.call_args_list[0]
+        self.assertEqual(login_call.args[0][1:], ["login"])
+        self.assertIs(login_call.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(login_call.kwargs["stdout"], sys.stderr)
+        self.assertIs(login_call.kwargs["stderr"], sys.stderr)
+        self.assertEqual(mock_run.call_args_list[1].args[0][1:], ["account", "get-access-token"])
+        self.assertIs(mock_run.call_args_list[1].kwargs["stdin"], subprocess.DEVNULL)
 
     @patch("mcp_kql_server.kql_auth.subprocess.run")
     def test_trigger_az_cli_auth_failure(self, mock_run):
@@ -78,6 +89,19 @@ class TestKQLAuth(unittest.TestCase):
 
         self.assertFalse(result["authenticated"])
         self.assertIn("Login failed", result["message"])
+
+    @patch("mcp_kql_server.kql_auth.subprocess.run")
+    def test_trigger_az_cli_auth_requires_token_after_login(self, mock_run):
+        """Test login is not accepted until Azure CLI can return a token."""
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stderr=""),
+            subprocess.CalledProcessError(1, "az", stderr="Token unavailable"),
+        ]
+
+        result = trigger_az_cli_auth()
+
+        self.assertFalse(result["authenticated"])
+        self.assertIn("token acquisition failed", result["message"].lower())
 
     @patch("mcp_kql_server.kql_auth.subprocess.run")
     def test_trigger_az_cli_auth_timeout(self, mock_run):
@@ -104,6 +128,27 @@ class TestKQLAuth(unittest.TestCase):
         self.assertTrue(result["authenticated"])
         self.assertIn("Already authenticated", result["message"])
 
+    @patch.dict("os.environ", {"MCP_KQL_AUTH_MODE": "managed-identity", "AZURE_CLIENT_ID": "client-id"})
+    @patch("mcp_kql_server.kql_auth.subprocess.run")
+    def test_managed_identity_authentication_skips_azure_cli(self, mock_run):
+        """Managed identity mode never launches Azure CLI."""
+        result = authenticate()
+
+        self.assertTrue(result["authenticated"])
+        self.assertEqual(result["auth_method"], "managed-identity")
+        mock_run.assert_not_called()
+
+    @patch.dict("os.environ", {"MCP_KQL_AUTH_MODE": "managed-identity", "AZURE_CLIENT_ID": "client-id"})
+    @patch("azure.kusto.data.KustoConnectionStringBuilder.with_aad_managed_service_identity_authentication")
+    def test_managed_identity_connection_builder_uses_client_id(self, mock_builder):
+        """User-assigned managed identity is forwarded to the Kusto SDK."""
+        build_kusto_connection_string("https://cluster.kusto.windows.net")
+
+        mock_builder.assert_called_once_with(
+            "https://cluster.kusto.windows.net",
+            client_id="client-id",
+        )
+
     @patch("mcp_kql_server.kql_auth.trigger_az_cli_auth")
     @patch("mcp_kql_server.kql_auth.kql_auth")
     def test_authenticate_needs_login(self, mock_kql_auth, mock_trigger_auth):
@@ -128,7 +173,7 @@ class TestKQLAuth(unittest.TestCase):
     @patch("mcp_kql_server.kql_auth.trigger_az_cli_auth")
     @patch("mcp_kql_server.kql_auth.kql_auth")
     def test_authenticate_non_interactive_does_not_login(self, mock_kql_auth, mock_trigger_auth):
-        """Test non-interactive auth check never starts device-code login."""
+        """Test non-interactive auth check never starts Azure CLI login."""
         mock_kql_auth.return_value = {
             "authenticated": False,
             "message": "Not authenticated",

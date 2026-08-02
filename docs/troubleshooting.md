@@ -1,6 +1,6 @@
 # Troubleshooting Guide - MCP KQL Server
 
-**Version**: 2.1.4
+**Version**: 2.1.5
 **Last Updated**: December 2025
 
 ---
@@ -54,7 +54,7 @@ else:
     print("Azure CLI: Not logged in")
 
 # Check dependencies
-deps = ["fastmcp", "azure.kusto.data", "azure.identity", "sentence_transformers"]
+deps = ["mcp", "azure.kusto.data", "azure.identity", "sentence_transformers"]
 for dep in deps:
     try:
         __import__(dep.split(".")[0])
@@ -157,7 +157,7 @@ for dep in deps:
    # Correct formats:
    "https://cluster.region.kusto.windows.net"
    "cluster.region.kusto.windows.net"  # Auto-prefixed
-   
+
    # Incorrect:
    "cluster.kusto.windows.net"  # Missing region
    ```
@@ -166,7 +166,7 @@ for dep in deps:
    ```bash
    # Windows
    Test-NetConnection cluster.region.kusto.windows.net -Port 443
-   
+
    # Linux/Mac
    nc -zv cluster.region.kusto.windows.net 443
    ```
@@ -277,10 +277,10 @@ for dep in deps:
    ```kql
    // Add time filters
    | where Timestamp > ago(1h)
-   
+
    // Limit rows early
    | take 10000
-   
+
    // Use summarize instead of returning all rows
    | summarize count() by Category
    ```
@@ -382,7 +382,7 @@ for dep in deps:
    ```bash
    # Windows
    del %APPDATA%\KQL_MCP\kql_memory.db
-   
+
    # Linux/Mac
    rm ~/.local/share/KQL_MCP/kql_memory.db
    ```
@@ -465,8 +465,9 @@ for dep in deps:
    ```
 
 2. **Reduce embedding model size:**
-   - Use smaller model variant
-   - Contact maintainer for model options
+   - Set `MCP_KQL_EMBEDDING_MODEL` before starting the server.
+   - The default `all-MiniLM-L6-v2` is the smallest supported high-speed option.
+   - After changing models, run `kql_schema_memory(operation="refresh_schema", ...)` so cached schemas receive embeddings from the selected model. Vectors from other models are ignored safely.
 
 3. **Limit connection pool:**
    ```python

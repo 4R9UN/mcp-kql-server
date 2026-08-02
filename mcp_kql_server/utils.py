@@ -15,7 +15,6 @@ Functions implemented here:
  - get_schema_column_names
  - validate_projected_columns
  - validate_all_query_columns
- - fix_query_with_real_schema
  - generate_query_description
 
 Author: Arjun Trivedi
@@ -27,6 +26,7 @@ import json
 import logging
 import os
 import re
+from urllib.parse import urlsplit
 from datetime import datetime
 from pathlib import Path
 import time
@@ -115,7 +115,14 @@ def _is_retryable_exc(e: BaseException) -> bool:
     Real transport failures (refused, reset, dns, throttling) remain retryable.
     """
     try:
-        s = str(e).lower()
+        messages = []
+        current: Optional[BaseException] = e
+        seen = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            messages.append(str(current))
+            current = current.__cause__ or current.__context__
+        s = " ".join(messages).lower()
         # Explicit non-retry: server-side servertimeout / request timed out.
         if (
             "servertimeout" in s
@@ -173,27 +180,6 @@ def retry_on_exception(max_attempts: int = 3, base_delay: float = 1.0, max_delay
             return sync_wrapped
     return deco
 
-def log_execution(func):
-    """Minimal execution logger decorator (sync+async)."""
-    if asyncio.iscoroutinefunction(func):
-        async def async_wrapped(*args, **kwargs):
-            start = datetime.now()
-            try:
-                return await func(*args, **kwargs)
-            finally:
-                logger.debug("%s took %.2fs", func.__name__, (datetime.now() - start).total_seconds())
-        return async_wrapped
-    else:
-        def sync_wrapped(*args, **kwargs):
-            start = datetime.now()
-            try:
-                return func(*args, **kwargs)
-            finally:
-                logger.debug("%s took %.2fs", func.__name__, (datetime.now() - start).total_seconds())
-        return sync_wrapped
-
-
-
 # ---------------------------------------------------------------------------
 # Path / filename helpers
 # ---------------------------------------------------------------------------
@@ -233,10 +219,26 @@ def normalize_cluster_uri(cluster_uri: str) -> str:
     """
     if not cluster_uri:
         raise ValueError("Cluster URI cannot be None or empty")
-    uri = cluster_uri.strip().lower()
-    if not uri.startswith("https://"):
+    uri = cluster_uri.strip()
+    if "://" not in uri:
         uri = f"https://{uri}"
-    return uri.rstrip("/")
+
+    parsed = urlsplit(uri)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("Cluster URI must use HTTPS")
+    if not parsed.hostname:
+        raise ValueError("Cluster URI must include a hostname")
+    if parsed.username or parsed.password:
+        raise ValueError("Cluster URI must not include credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Cluster URI must not include query parameters or fragments")
+    if parsed.path not in {"", "/"}:
+        raise ValueError("Cluster URI must not include a path")
+
+    host = parsed.hostname.lower()
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return f"https://{host}"
 
 
 def get_default_cluster_memory_path() -> Path:
@@ -401,7 +403,8 @@ class SchemaManager:
         Enhanced async wrapper for executing Kusto queries with comprehensive error handling,
         retry logic, connection validation, and graceful degradation.
         """
-        from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
+        from azure.kusto.data import KustoClient
+        from .kql_auth import build_kusto_connection_string
         from .constants import (
             CONNECTION_CONFIG,
             RETRYABLE_ERROR_PATTERNS, NON_RETRYABLE_ERROR_PATTERNS
@@ -476,7 +479,7 @@ class SchemaManager:
             for attempt in range(max_retries + 1):  # +1 for initial attempt
                 try:
                     # Create connection with timeout configuration
-                    kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
+                    kcsb = build_kusto_connection_string(cluster_url)
 
                     with KustoClient(kcsb) as client:
                         # Execute query/management command
@@ -566,8 +569,9 @@ class SchemaManager:
     def _test_cluster_access(self, cluster_url: str, _timeout: float) -> bool:
         """Test actual cluster access with a minimal query."""
         try:
-            from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
-            kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
+            from azure.kusto.data import KustoClient
+            from .kql_auth import build_kusto_connection_string
+            kcsb = build_kusto_connection_string(cluster_url)
 
             with KustoClient(kcsb) as client:
                 # Use a lightweight query that should work on any cluster
@@ -1296,7 +1300,8 @@ class SchemaManager:
         Validate authentication specifically for a cluster and database combination.
         """
         try:
-            from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
+            from azure.kusto.data import KustoClient
+            from .kql_auth import build_kusto_connection_string
             logger.info("Validating authentication for %s/%s", cluster_url, database)
 
             # Step 1: Basic authentication validation
@@ -1306,7 +1311,7 @@ class SchemaManager:
 
             # Step 2: Test database-specific access
             try:
-                kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
+                kcsb = build_kusto_connection_string(cluster_url)
 
                 with KustoClient(kcsb) as client:
                     # Test database access with a minimal query
@@ -1554,14 +1559,8 @@ class SchemaDiscovery(SchemaManager):
         return {c.lower(): c for c in cols}
 
     def _normalize_cluster_uri(self, cluster_uri: str) -> str:
-        """Normalize cluster URI format."""
-        if not cluster_uri:
-            return cluster_uri
-        s = str(cluster_uri).strip()
-        if not s.startswith("http://") and not s.startswith("https://"):
-            s = "https://" + s
-        s = s.rstrip("/")
-        return s
+        """Normalize cluster URI through the canonical endpoint policy."""
+        return normalize_cluster_uri(cluster_uri) if cluster_uri else cluster_uri
 
 def get_schema_discovery() -> SchemaDiscovery:
     """
@@ -1594,23 +1593,6 @@ def get_schema_discovery_status() -> Dict[str, Any]:
         "live_discovery_enabled": True
     }
 
-# ---------------------------------------------------------------------------
-# Simple query helpers
-# ---------------------------------------------------------------------------
-def fix_query_with_real_schema(query: str) -> str:
-    """Attempt to fix a query when cluster/database/table info is present.
-
-    This is a conservative, best-effort implementation for tests: if the query
-    does not contain explicit cluster/database information, return it unchanged.
-    """
-    if not query or not isinstance(query, str):
-        return query
-    # Detect the pattern cluster('..').database('..') - if not present, bail out
-    if not re.search(r"cluster\(['\"]([^'\"]+)['\"]\)\.database\(['\"]([^'\"]+)['\"]\)", query):
-        return query
-    # For now return unchanged; richer behavior can be added later
-    return query
-
 def generate_query_description(query: str) -> str:
     """Produce a short description for a query (used when storing successful queries)."""
     if not query:
@@ -1618,44 +1600,11 @@ def generate_query_description(query: str) -> str:
     s = " ".join(query.strip().split())
     return s[:200] if len(s) > 200 else s
 
-def normalize_name(name: str) -> str:
-    """Normalize a name for comparison (lowercase, strip whitespace)"""
-    if not name:
-        return ""
-    return str(name).lower().strip().replace("https://", "").replace("http://", "").replace("/", "_").replace(".", "_")
-
-
-
 class ErrorHandler:
     """
     Consolidated error handling utilities for consistent error management across the codebase.
     This reduces duplicate error handling patterns found throughout the modules.
     """
-
-    @staticmethod
-    def safe_execute(func, *args, default=None, error_msg="Operation failed", log_level="warning", **kwargs):
-        """
-        Safely execute a function with consistent error handling.
-        """
-        try:
-            return func(*args, **kwargs)
-        except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError) as e:
-            log_func = getattr(logger, log_level, logger.warning)
-            log_func("%s: %s", error_msg, e)
-            return default
-
-    @staticmethod
-    def safe_get_nested(data: dict, *keys, default=None):
-        """
-        Safely get nested dictionary values with consistent error handling.
-        """
-        try:
-            result = data
-            for key in keys:
-                result = result[key]
-            return result
-        except (KeyError, TypeError, AttributeError):
-            return default
 
     @staticmethod
     def safe_json_dumps(data, default="{}", **kwargs):
@@ -1692,14 +1641,6 @@ class ErrorHandler:
         except (ValueError, TypeError, AttributeError) as e:
             logger.warning("JSON serialization failed: %s", e)
             return default
-
-    @staticmethod
-    def handle_import_error(module_name: str, fallback=None):
-        """
-        Handle import errors consistently.
-        """
-        logger.warning("%s not available", module_name)
-        return fallback
 
     @staticmethod
     def handle_kusto_error(e: Exception) -> Dict[str, Any]:

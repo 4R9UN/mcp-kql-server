@@ -2,6 +2,51 @@
 
 ---
 
+## v2.1.5 - Policy Compliant Azure Login and MCP SDK Compatibility
+
+**Release Date**: August 2, 2026
+
+### Authentication
+
+- Checks `az account get-access-token` before attempting login.
+- Runs plain interactive `az login` only when no usable token is available.
+- Verifies token acquisition after login before allowing KQL execution.
+- Completes authentication at server startup so tool requests never block on interactive login.
+- Never invokes `az login --use-device-code`.
+
+### MCP Runtime
+
+- Migrated from the third party `fastmcp` distribution to the official `mcp` Python SDK.
+- Eliminates the `fastmcp` and `fastmcp-slim` mixed installation crash involving `PrivateKeyJWTClientAuthenticator`.
+- Eliminates the FastMCP 2 `AuthlibDeprecationWarning` path while preserving tool names and stdio or streamable HTTP transports.
+
+### Maintenance
+
+- Removed unreachable prompt templates, unused analyzers and feature registries, no-op query wrappers, and definition-only utility methods.
+- Replaced the optional PyPI version check's HTTP client fallback with `urllib.request`.
+- Removed redundant direct dependency declarations while retaining semantic search, schema validation, connection pooling, and compatibility bounds.
+- Removed the direct Pydantic constraint because the server does not import Pydantic; the official MCP SDK now owns that transitive requirement, preventing this package from downgrading Pydantic in shared environments.
+- Enforced read-only Kusto execution, allowing only `.show` and `.help` management commands.
+- Added loopback-only HTTP defaults, HTTPS endpoint validation, bounded responses and caches, and nonblocking authentication/query execution.
+- Closed SQLite connections deterministically and evicted expired cache entries during normal use.
+- Added model-aware embedding storage, configurable semantic models, offline ranking quality gates, and current MCP protocol discovery tests.
+- Made package metadata imports side-effect free and lazy, reducing measured cold import time from about 2.94 seconds to 0.11 seconds.
+- Added managed identity authentication and an internal-only streamable HTTP Container Apps deployment path.
+- Extracted bounded DataFrame/result handling from the main MCP tool handler into a dedicated formatter module.
+- Starts MCP transport immediately while Azure CLI authentication initializes in the background.
+- Makes Kusto tool calls wait for the startup authentication result without launching login during execution.
+- Reduces the normal query budget to 120 seconds while retaining the 600 second hard ceiling.
+- Detects timeout causes wrapped by the Azure Kusto SDK and prevents another full retry.
+- Requires lint, package validation, the platform install matrix, and tests before PyPI publishing.
+
+### Upgrade
+
+```bash
+pip install --upgrade mcp-kql-server==2.1.5
+```
+
+---
+
 ## 🚀 **v2.1.4 - NL2KQL Accuracy, Schema Type Normalization & Log Redaction**
 
 > **Sharpens NL2KQL generation accuracy and hardens logging, with no changes to the public tool contract.**
@@ -155,7 +200,7 @@ If you see warnings about other unrelated packages on your machine pinning older
 
 ## 🚀 **v2.1.1 - Schema-Grounded CAG & Runtime Accuracy**
 
-> **Strict schema-first generation, safer cache scoping, and repair-before-execute** 
+> **Strict schema-first generation, safer cache scoping, and repair-before-execute**
 
 **Release Date**: March 17, 2026
 **Author**: Arjun Trivedi
@@ -424,7 +469,7 @@ try:
     bracketed_table = bracket_if_needed(table)
     sample_query = f"{bracketed_table} | take 2"
     sample_result = await self._execute_kusto_async(sample_query, cluster, database, is_mgmt=False)
-    
+
     if sample_result and len(sample_result) > 0:
         # Extract sample values for each column
         sample_values = [str(row.get(col_name, '')) for row in sample_result[:2]
@@ -1037,10 +1082,10 @@ Query and schema memory APIs remain backward compatible. New features available 
 
 ## 📞 **Contact Information**
 
-**Maintainer**: Arjun Trivedi  
-**Email**: [arjuntrivedi42@yahoo.com](mailto:arjuntrivedi42@yahoo.com)  
-**GitHub**: [@4R9UN](https://github.com/4R9UN)  
-**Repository**: [mcp-kql-server](https://github.com/4R9UN/mcp-kql-server)  
+**Maintainer**: Arjun Trivedi
+**Email**: [arjuntrivedi42@yahoo.com](mailto:arjuntrivedi42@yahoo.com)
+**GitHub**: [@4R9UN](https://github.com/4R9UN)
+**Repository**: [mcp-kql-server](https://github.com/4R9UN/mcp-kql-server)
 **PyPI**: [mcp-kql-server](https://pypi.org/project/mcp-kql-server/)
 
 ---

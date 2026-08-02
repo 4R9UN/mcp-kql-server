@@ -14,14 +14,13 @@ import re
 import ntpath
 import posixpath
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 # Version information - single source of truth for the package version.
 # Keep this in sync with pyproject.toml and server.json (CI enforces parity).
-__version__ = "2.1.4"
+__version__ = "2.1.5"
 VERSION = __version__
-MCP_PROTOCOL_VERSION = "2024-11-05"
 
 # Server configuration
 SERVER_NAME = f"mcp-kql-server({__version__})"
@@ -154,7 +153,7 @@ SCHEMA_FILE_EXTENSION = ".json"
 DEFAULT_KUSTO_DOMAIN = "kusto.windows.net"
 SYSTEM_DATABASES = {"$systemdb"}
 DEFAULT_CONNECTION_TIMEOUT = 60
-DEFAULT_QUERY_TIMEOUT = 600
+DEFAULT_QUERY_TIMEOUT = 120
 # Hard server-side ceiling for any single Kusto query, in seconds.
 # Sent to ADX via ClientRequestProperties.servertimeout.
 # 10 minutes is the deliberate upper bound for this MCP server.
@@ -171,26 +170,6 @@ MAX_COLUMNS_PER_TABLE = 500
 # Query validation
 MAX_QUERY_LENGTH = 100000
 MIN_QUERY_LENGTH = 10
-
-# Default configuration (no environment variables required)
-DEFAULT_CONFIG = {
-    "DEBUG_MODE": False,
-    "AZURE_ERRORS_ONLY": True,
-    "CONNECTION_TIMEOUT": DEFAULT_CONNECTION_TIMEOUT,
-    "QUERY_TIMEOUT": DEFAULT_QUERY_TIMEOUT,
-    "AUTO_CREATE_MEMORY_PATH": True,
-    "ENABLE_LOGGING": True,
-}
-
-# Caching and strategy defaults (sensible fallbacks for missing configuration)
-CACHE_STRATEGIES = {
-    # Maximum number of schema entries to retain in memory (LRU eviction)
-    "SCHEMA_CACHE_SIZE": 1000,
-    # Maximum number of pattern analysis entries to retain
-    "PATTERN_CACHE_SIZE": 500,
-    # Column mapping cache size
-    "COLUMN_MAPPING_CACHE_SIZE": 500,
-}
 
 # Enhanced error handling configuration used by discovery/fetch routines
 ENHANCED_ERROR_HANDLING = {
@@ -227,6 +206,7 @@ FILE_PERMISSIONS = {
 LIMITS = {
     "max_concurrent_queries": 5,
     "max_result_rows": 10000,
+    "max_result_bytes": 2_000_000,
     "max_visualization_rows": 1000,
     "max_column_description_length": 500,
     "max_table_description_length": 1000,
@@ -705,314 +685,6 @@ def get_data_dir() -> Path:
     return data_dir
 
 
-# Dynamic Schema Analysis Configuration
-class DynamicSchemaAnalyzer:
-    """
-    Replace static patterns with dynamic analysis.
-    This class provides methods for dynamic table and column analysis.
-    """
-
-    @staticmethod
-    def analyze_table_semantics(table_name: str, sample_data: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        """
-        Dynamically analyze table purpose from actual data patterns.
-        Replaces static keyword-based table categorization.
-        """
-        if not table_name:
-            return {"purpose": "unknown", "confidence": 0.0}
-
-        # Dynamic analysis based on data patterns
-        analysis = {
-            "purpose": "data_table",
-            "confidence": 0.5,
-            "temporal_columns": [],
-            "key_columns": [],
-            "relationships": []
-        }
-
-        # Analyze sample data if available
-        if sample_data and len(sample_data) > 0:
-            analysis.update(DynamicSchemaAnalyzer._analyze_data_patterns(sample_data))
-
-        # Table name pattern analysis (dynamic, not hardcoded keywords)
-        analysis.update(DynamicSchemaAnalyzer._analyze_table_name_patterns(table_name))
-
-        return analysis
-
-    @staticmethod
-    def _analyze_data_patterns(sample_data: List[Dict]) -> Dict[str, Any]:
-        """Analyze actual data patterns to determine table characteristics."""
-        if not sample_data:
-            return {}
-
-        patterns = {
-            "has_timestamps": False,
-            "has_identifiers": False,
-            "has_metrics": False,
-            "data_quality": "unknown"
-        }
-
-        # Check for common column patterns in data
-        first_row = sample_data[0] if sample_data else {}
-
-        for value in first_row.values():
-            if value is None:
-                continue
-
-            value_str = str(value)
-
-            # Detect temporal patterns
-            if DynamicSchemaAnalyzer._looks_like_timestamp(value_str):
-                patterns["has_timestamps"] = True
-
-            # Detect identifier patterns
-            if DynamicSchemaAnalyzer._looks_like_identifier(value_str):
-                patterns["has_identifiers"] = True
-
-            # Detect metric patterns
-            if DynamicSchemaAnalyzer._looks_like_metric(value_str):
-                patterns["has_metrics"] = True
-
-        return patterns
-
-    @staticmethod
-    def _analyze_table_name_patterns(table_name: str) -> Dict[str, Any]:
-        """Analyze table name for semantic patterns without hardcoded keywords."""
-        name_lower = table_name.lower()
-
-        # Dynamic pattern recognition
-        patterns = {
-            "table_type": "general",
-            "likely_temporal": False,
-            "likely_transactional": False
-        }
-
-        # Use pattern length and structure analysis instead of keywords
-        if len(name_lower) > 10 and any(sep in name_lower for sep in ['_', '-']):
-            patterns["table_type"] = "structured"
-
-        # Check for timestamp-like naming patterns
-        if any(time_indicator in name_lower for time_indicator in ['time', 'date', 'log', 'event']):
-            patterns["likely_temporal"] = True
-
-        # Check for transaction-like patterns
-        if name_lower.endswith(('s', 'es', 'ies')):  # Plural forms often indicate collections
-            patterns["likely_transactional"] = True
-
-        return patterns
-
-    @staticmethod
-    def _looks_like_timestamp(value: str) -> bool:
-        """Dynamic timestamp detection."""
-        timestamp_patterns = [
-            r'\d{4}-\d{2}-\d{2}',  # Date pattern
-            r'\d{2}:\d{2}:\d{2}',  # Time pattern
-            r'^\d{10,13}$',        # Unix timestamp
-        ]
-        return any(re.search(pattern, value) for pattern in timestamp_patterns)
-
-    @staticmethod
-    def _looks_like_identifier(value: str) -> bool:
-        """Dynamic identifier detection."""
-        id_patterns = [
-            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',  # UUID
-            r'^[0-9a-f]{32}$',  # MD5 hash
-            r'^[A-Z0-9]{8,}$',  # Uppercase alphanumeric ID
-        ]
-        return any(re.match(pattern, value, re.IGNORECASE) for pattern in id_patterns)
-
-    @staticmethod
-    def _looks_like_metric(value: str) -> bool:
-        """Dynamic metric detection."""
-        try:
-            float(value.replace(',', ''))
-            return True
-        except ValueError:
-            return False
-
-    @staticmethod
-    def analyze_table_characteristics(table_name: str, columns: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze table characteristics for optimization purposes.
-
-        Args:
-            table_name: Name of the table to analyze
-            columns: Dictionary of column information
-
-        Returns:
-            Dictionary containing table characteristics analysis
-        """
-        characteristics = {
-            "table_name": table_name,
-            "has_temporal_data": False,
-            "has_identifiers": False,
-            "has_metrics": False,
-            "column_count": len(columns),
-            "optimization_hints": []
-        }
-
-        if not columns:
-            return characteristics
-
-        # Analyze columns to determine table characteristics
-        for col_name, col_info in columns.items():
-            if not isinstance(col_info, dict):
-                continue
-
-            col_type = col_info.get("data_type", "").lower()
-
-            # Check for temporal columns
-            if any(t in col_type for t in ["datetime", "timestamp", "date"]):
-                characteristics["has_temporal_data"] = True
-
-            # Check for identifier columns
-            if "id" in col_name.lower() or "guid" in col_type or "uuid" in col_type:
-                characteristics["has_identifiers"] = True
-
-            # Check for metric columns
-            if any(t in col_type for t in ["int", "long", "real", "decimal", "float"]):
-                characteristics["has_metrics"] = True
-
-        # Generate optimization hints
-        if characteristics["has_temporal_data"]:
-            characteristics["optimization_hints"] = []
-            characteristics["optimization_hints"].append(
-                "Consider time-based filtering for better performance"
-            )
-        if characteristics["has_identifiers"]:
-            if "optimization_hints" not in characteristics:
-                characteristics["optimization_hints"] = []
-            characteristics["optimization_hints"].append(
-                "Identifiers present - suitable for joins"
-            )
-        if characteristics["has_metrics"]:
-            if "optimization_hints" not in characteristics:
-                characteristics["optimization_hints"] = []
-            characteristics["optimization_hints"].append(
-                "Numeric metrics available - consider aggregations"
-            )
-
-        return characteristics
-
-
-# Dynamic Column Analysis Configuration
-class DynamicColumnAnalyzer:
-    """
-    Replace static column patterns with dynamic analysis.
-    """
-
-    @staticmethod
-    def generate_column_tags(column_name: str, data_type: str, sample_values: Optional[List[str]] = None) -> List[str]:
-        """
-        Generate smart column tags based on data type and patterns, not static keywords.
-        Replaces the static keyword-based approach in memory.py and utils.py.
-        """
-        tags = []
-
-        # Dynamic data type analysis
-        type_lower = data_type.lower() if data_type else ""
-
-        # Type-based tags (primary categorization)
-        if any(t in type_lower for t in ['datetime', 'timestamp', 'date', 'time']):
-            tags.append("TEMPORAL")
-        elif any(t in type_lower for t in ['int', 'long', 'short', 'byte']):
-            tags.append("INTEGER")
-        elif any(t in type_lower for t in ['real', 'double', 'float', 'decimal']):
-            tags.append("DECIMAL")
-        elif any(t in type_lower for t in ['bool', 'boolean']):
-            tags.append("BOOLEAN")
-        elif any(t in type_lower for t in ['guid', 'uuid']):
-            tags.append("IDENTIFIER")
-        elif any(t in type_lower for t in ['dynamic', 'json', 'object']):
-            tags.append("STRUCTURED")
-        elif any(t in type_lower for t in ['string', 'text', 'varchar', 'char']):
-            tags.append("TEXT")
-
-        # Dynamic sample value analysis
-        if sample_values:
-            value_tags = DynamicColumnAnalyzer._analyze_sample_values(sample_values)
-            tags.extend(value_tags)
-
-        # Dynamic column name analysis (pattern-based, not keyword matching)
-        name_tags = DynamicColumnAnalyzer._analyze_column_name_patterns(column_name)
-        tags.extend(name_tags)
-
-        return list(dict.fromkeys(tags))[:3]  # Remove duplicates and limit to 3 tags
-
-    @staticmethod
-    def _analyze_sample_values(sample_values: List[str]) -> List[str]:
-        """Analyze sample values to determine column characteristics."""
-        tags: List[str] = []
-
-        if not sample_values:
-            return tags
-
-        # Check if all values are unique (likely identifier)
-        if len(set(sample_values)) == len(sample_values):
-            tags.append("UNIQUE_VALUES")
-
-        # Check if values are categorizable (limited set)
-        if len(set(sample_values)) <= len(sample_values) * 0.5:
-            tags.append("CATEGORICAL")
-
-        # Check for numerical patterns
-        try:
-            numeric_values = [float(str(v).replace(',', '')) for v in sample_values if v]
-            if numeric_values:
-                if all(v.is_integer() for v in numeric_values):
-                    tags.append("COUNT_LIKE")
-                else:
-                    tags.append("MEASUREMENT_LIKE")
-        except (ValueError, AttributeError):
-            pass
-
-        return tags
-
-    @staticmethod
-    def _analyze_column_name_patterns(column_name: str) -> List[str]:
-        """Analyze column name patterns dynamically."""
-        tags = []
-        name_lower = column_name.lower()
-
-        # Dynamic pattern analysis
-        if name_lower.endswith('id') or name_lower.endswith('_id'):
-            tags.append("ID_COLUMN")
-
-        if 'time' in name_lower or 'date' in name_lower:
-            tags.append("TIME_COLUMN")
-
-        if name_lower.startswith('is_') or name_lower.startswith('has_'):
-            tags.append("BOOLEAN_FLAG")
-
-        if any(sep in name_lower for sep in ['_count', '_total', '_sum']):
-            tags.append("AGGREGATION_COLUMN")
-
-        return tags
-
-
-# Replace static patterns with dynamic factory functions
-def get_dynamic_table_analyzer() -> DynamicSchemaAnalyzer:
-    """Get dynamic table analyzer instance."""
-    return DynamicSchemaAnalyzer()
-
-
-def get_dynamic_column_analyzer() -> DynamicColumnAnalyzer:
-    """Get dynamic column analyzer instance."""
-    return DynamicColumnAnalyzer()
-
-# Monitoring system removed - no placeholder functions needed
-
-# Query Chaining Configuration
-QUERY_CHAINING_CONFIG = {
-    "enable_query_chaining": True,
-    "enable_background_schema_discovery": True,
-    "enable_context_aware_planning": True,
-    "enable_execution_result_feedback": True,
-    "max_chain_length": 5,
-    "chain_timeout_seconds": 300,
-    "context_window_size": 1000,
-    "enable_adaptive_throttling": True,
-}
-
 # Network Connection Configuration
 CONNECTION_CONFIG = {
     "max_retries": 5,
@@ -1089,58 +761,9 @@ NON_RETRYABLE_ERROR_PATTERNS = [
     r"QuotaExceeded.*?permanent",
 ]
 
-BACKGROUND_SCHEMA_CONFIG = {
-    "enable_trigger_based_discovery": True,
-    "discovery_trigger_conditions": {
-        "new_table_reference": True,
-        "unknown_column_usage": True,
-        "query_execution_success": True,
-        "schema_validation_failure": True,
-        "context_gap_detected": True,
-    },
-}
-
-# Types of operations that can be orchestrated via query chaining
-CHAINING_OPERATION_TYPES = [
-    "discover_schema",
-    "update_schema",
-    "generate_kql",
-    "execute_kql",
-    "persist_memory",
-]
-
-def get_query_chaining_config() -> dict:
-    """Return the active chaining configuration (fallback to defaults)."""
-    return QUERY_CHAINING_CONFIG
-
-def get_chaining_threshold(default: float = 0.5) -> float:
-    """Return the chaining threshold used to decide whether to trigger chaining behavior."""
-    try:
-        return float(QUERY_CHAINING_CONFIG.get("chaining_threshold", default))
-    except (ValueError, TypeError):
-        return default
-
-def is_chaining_feature_enabled(feature_name: str, config_section: str = "chaining") -> bool:
-    """Check if a chaining feature is enabled."""
-    config = QUERY_CHAINING_CONFIG if config_section == "chaining" else {}
-    return bool(config.get(feature_name, False))
-
-def should_trigger_background_schema_discovery(trigger_type: str) -> bool:
-    """Check if background schema discovery should be triggered."""
-    if not is_chaining_feature_enabled("enable_background_schema_discovery"):
-        return False
-    trigger_conditions = BACKGROUND_SCHEMA_CONFIG.get("discovery_trigger_conditions", {})
-    if isinstance(trigger_conditions, dict):
-        return trigger_conditions.get(trigger_type, False)
-    return False
-
 # Precompiled regex sets for reuse across modules (reduce repeated compilation)
 KQL_SYNTAX_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in KQL_SYNTAX_PATTERNS]
 QUESTION_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in QUESTION_PATTERNS]
-
-def is_performance_feature_enabled(feature_name: str) -> bool:
-    """Return whether a performance-related feature is enabled (case-insensitive)."""
-    return bool(PERFORMANCE_CONFIG.get(feature_name.upper(), False))
 
 # Default await timeout for async wrappers that run sync work in background threads
 DEFAULT_AWAIT_TIMEOUT = 30

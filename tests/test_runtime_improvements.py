@@ -1,6 +1,7 @@
 """Regression tests for cache scoping, table tracking, and runtime safety."""
 
 import json
+import sqlite3
 from unittest.mock import AsyncMock
 
 import pytest
@@ -105,6 +106,35 @@ def test_clear_query_cache_can_be_scoped(memory_manager):
         cluster="https://cluster-b.kusto.windows.net",
         database="db",
     ) == "b"
+
+
+def test_memory_connections_close_and_expired_cache_is_deleted(memory_manager):
+    """SQLite handles close after each operation and expired cache rows are evicted."""
+    with memory_manager._connect() as connection:  # pylint: disable=protected-access
+        connection.execute("SELECT 1")
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
+
+    query = "SecurityAlert | take 1"
+    memory_manager.cache_query_result(query, "cached", 1)
+    assert memory_manager.get_cached_result(query, ttl_seconds=0) is None
+    assert memory_manager.get_cache_stats()["total_cached"] == 0
+
+
+def test_query_cache_bounds_entries_and_payload_size(memory_manager, monkeypatch):
+    """Persistent result caching remains finite and skips oversized payloads."""
+    monkeypatch.setenv("MCP_KQL_MAX_CACHE_ENTRIES", "2")
+    monkeypatch.setenv("MCP_KQL_MAX_CACHED_RESULT_BYTES", "20")
+
+    memory_manager.cache_query_result("q1", "one", 1)
+    memory_manager.cache_query_result("q2", "two", 1)
+    memory_manager.cache_query_result("q3", "three", 1)
+    memory_manager.cache_query_result("oversized", "x" * 21, 1)
+
+    assert memory_manager.get_cache_stats()["total_cached"] == 2
+    assert memory_manager.get_cached_result("q1") is None
+    assert memory_manager.get_cached_result("oversized") is None
 
 
 def test_memory_stats_include_generation_telemetry(memory_manager):

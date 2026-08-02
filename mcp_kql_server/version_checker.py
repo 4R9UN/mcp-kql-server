@@ -9,9 +9,12 @@ Email: arjuntrivedi42@yahoo.com
 """
 
 import logging
+import json
 import subprocess
 import sys
 from typing import Any, Dict, Optional, Tuple
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 from packaging import version as pkg_version
 
 logger = logging.getLogger(__name__)
@@ -37,28 +40,12 @@ def fetch_latest_pypi_version(timeout: int = 5) -> Optional[str]:
         Latest version string or None if fetch fails.
     """
     try:
-        import httpx
-
         url = f"https://pypi.org/pypi/{PYPI_PACKAGE_NAME}/json"
-        with httpx.Client(timeout=timeout) as client:
-            response = client.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("info", {}).get("version")
-    except ImportError:
-        # Fallback to requests if httpx not available
-        try:
-            import requests
-            url = f"https://pypi.org/pypi/{PYPI_PACKAGE_NAME}/json"
-            response = requests.get(url, timeout=timeout)
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("info", {}).get("version")
-        except ImportError:
-            logger.debug("requests library not available for PyPI version check.")
-        except (OSError, ValueError, TypeError) as e:
-            logger.debug("Failed to fetch PyPI version with requests: %s", e)
-    except (OSError, ValueError) as e:
+        request = Request(url, headers={"User-Agent": f"{PYPI_PACKAGE_NAME}-version-check"})
+        with urlopen(request, timeout=timeout) as response:  # nosec B310 - fixed HTTPS PyPI URL
+            data = json.load(response)
+            return data.get("info", {}).get("version")
+    except (URLError, OSError, ValueError, TypeError) as e:
         logger.debug("Failed to fetch PyPI version: %s", e)
 
     return None

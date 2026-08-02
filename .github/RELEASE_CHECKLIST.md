@@ -126,7 +126,6 @@ Ensure these files are updated/present for each release:
 - [ ] `mcp_kql_server/memory.py` - Schema memory
 - [ ] `mcp_kql_server/performance.py` - Performance utilities
 - [ ] `mcp_kql_server/utils.py` - Utilities
-- [ ] `mcp_kql_server/ai_prompts.py` - AI prompts
 - [ ] `mcp_kql_server/py.typed` - Type marker
 
 ### Documentation Files

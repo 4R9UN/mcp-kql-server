@@ -63,7 +63,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
     managedEnvironmentId: containerAppEnv.id
     configuration: {
       ingress: {
-        external: true
+        external: false
         targetPort: 8000
         transport: 'auto'
       }
@@ -94,8 +94,32 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               value: managedIdentity.properties.clientId
             }
             {
-              name: 'LOG_LEVEL'
+              name: 'MCP_KQL_AUTH_MODE'
+              value: 'managed-identity'
+            }
+            {
+              name: 'MCP_KQL_ALLOW_UNAUTHENTICATED_REMOTE_HTTP'
+              value: 'true'
+            }
+            {
+              name: 'FASTMCP_TRANSPORT'
+              value: 'streamable-http'
+            }
+            {
+              name: 'FASTMCP_HOST'
+              value: '0.0.0.0'
+            }
+            {
+              name: 'FASTMCP_PORT'
+              value: '8000'
+            }
+            {
+              name: 'MCP_KQL_LOG_LEVEL'
               value: 'INFO'
+            }
+            {
+              name: 'MCP_KQL_CACHE_RESULTS'
+              value: 'false'
             }
           ]
           resources: {

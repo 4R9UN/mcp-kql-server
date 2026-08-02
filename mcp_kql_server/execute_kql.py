@@ -10,7 +10,9 @@ Email: arjuntrivedi42@yahoo.com
 
 import asyncio
 import logging
+import os
 import re
+import threading
 import time
 import json
 import uuid
@@ -27,6 +29,7 @@ from .constants import (
     DEFAULT_QUERY_TIMEOUT,
     KUSTO_MAX_QUERY_TIMEOUT_SECONDS,
     KUSTO_MIN_QUERY_TIMEOUT_SECONDS,
+    LIMITS,
 )
 from .memory import get_memory_manager
 from .performance import get_connection_pool
@@ -56,6 +59,9 @@ ERROR_CLASS_PERMANENT_OTHER = "permanent_other"
 RECOVERABLE_ERROR_CLASSES = frozenset({ERROR_CLASS_SCHEMA_DRIFT})
 # Errors safe to retry transparently with backoff (network/transport class).
 AUTO_RETRY_ERROR_CLASSES = frozenset({ERROR_CLASS_TRANSIENT, ERROR_CLASS_THROTTLED})
+_QUERY_SEMAPHORE = threading.BoundedSemaphore(
+    max(1, int(os.environ.get("MCP_KQL_MAX_CONCURRENT_QUERIES", LIMITS["max_concurrent_queries"])))
+)
 
 
 def classify_kusto_error(error: Any) -> str:
@@ -274,6 +280,56 @@ def _parse_kusto_response(response) -> pd.DataFrame:
 
     return df
 
+
+def _validate_read_only_query(query: str) -> None:
+    """Reject Kusto management commands that can mutate cluster state."""
+    statements = []
+    current = []
+    quote = None
+    index = 0
+    while index < len(query):
+        char = query[index]
+        next_char = query[index + 1] if index + 1 < len(query) else ""
+
+        if quote:
+            current.append(char)
+            if char == quote:
+                if next_char == quote:
+                    current.append(next_char)
+                    index += 1
+                else:
+                    quote = None
+        elif char in {"'", '"'}:
+            quote = char
+            current.append(char)
+        elif char == "/" and next_char == "/":
+            index = query.find("\n", index + 2)
+            if index == -1:
+                break
+            current.append("\n")
+        elif char == "/" and next_char == "*":
+            comment_end = query.find("*/", index + 2)
+            if comment_end == -1:
+                raise ValueError("KQL query contains an unterminated block comment")
+            index = comment_end + 1
+        elif char == ";":
+            statements.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        index += 1
+
+    statements.append("".join(current).strip())
+    for statement in statements:
+        if not statement.startswith("."):
+            continue
+        command = statement.split(maxsplit=1)[0].lower()
+        if command not in {".show", ".help"}:
+            raise ValueError(
+                "Only read-only Kusto management commands '.show' and '.help' are allowed"
+            )
+
+
 @retry_on_exception()
 def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, timeout: int = DEFAULT_QUERY_TIMEOUT) -> pd.DataFrame:
     """
@@ -286,6 +342,7 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, timeo
     Adds a per-query ``client_request_id`` for cross-process tracing and
     leaves transient transport retries to the ``retry_on_exception`` decorator.
     """
+    _validate_read_only_query(kql_query)
     cluster_url = normalize_cluster_uri(cluster)
     crp = _build_request_properties(timeout, kql_query)
     logger.info(
@@ -301,10 +358,11 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, timeo
 
         # First execution attempt
         try:
-            if is_mgmt_query:
-                response = client.execute_mgmt(database, kql_query, crp)
-            else:
-                response = client.execute(database, kql_query, crp)
+            with _QUERY_SEMAPHORE:
+                if is_mgmt_query:
+                    response = client.execute_mgmt(database, kql_query, crp)
+                else:
+                    response = client.execute(database, kql_query, crp)
 
             execution_time_ms = (time.time() - start_time) * 1000
             df = _parse_kusto_response(response)
@@ -341,61 +399,6 @@ def _execute_kusto_query_sync(kql_query: str, cluster: str, database: str, timeo
     finally:
         # Do not close the client as it is now pooled/cached
         pass
-
-
-def execute_large_query(query: str, cluster: str, database: str, _chunk_size: int = 1000, timeout: int = DEFAULT_QUERY_TIMEOUT) -> pd.DataFrame:
-    """
-    Minimal query chunking helper.
-    - If the query already contains explicit 'take' or 'limit', execute as-is.
-    - Otherwise run a single timed execution (safe fallback).
-    This conservative approach avoids aggressive query rewriting while enabling
-    an explicit place to improve chunking later.
-    """
-    if ' take ' in (query or "").lower() or ' limit ' in (query or "").lower():
-        return _execute_kusto_query_sync(query, cluster, database, timeout)
-    # Fallback: single execution with configured timeout & retries
-    return _execute_kusto_query_sync(query, cluster, database, timeout)
-
-
-
-
-# Essential functions for compatibility
-def validate_kql_query_advanced(query: str, cluster: Optional[str] = None, database: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Simplified KQL query validation.
-    """
-    try:
-        if not query or not query.strip():
-            return {
-                "valid": False,
-                "error": "Query cannot be empty",
-                "suggestions": []
-            }
-
-        # Basic KQL syntax validation
-        query_lower = query.lower().strip()
-
-        # Check for management commands
-        if query_lower.startswith('.') and not any(cmd in query_lower for cmd in ['.show', '.list', '.help']):
-            return {
-                "valid": False,
-                "error": "Invalid management command",
-                "suggestions": ["Use .show tables or .show databases for management commands"]
-            }
-
-        return {
-            "valid": True,
-            "cluster": cluster,
-            "database": database,
-            "suggestions": []
-        }
-
-    except (ValueError, TypeError, AttributeError) as e:
-        return {
-            "valid": False,
-            "error": str(e),
-            "suggestions": []
-        }
 
 
 def kql_execute_tool(kql_query: str, cluster_uri: Optional[str] = None, database: Optional[str] = None) -> pd.DataFrame:
@@ -773,77 +776,9 @@ async def execute_kql_query(
         raise  # Re-raise for test compatibility
 
 
-async def execute_with_full_flow(query: str, user_context: Optional[str] = None) -> Dict:
-    """
-    Implement complete execution flow with learning as recommended in the analysis.
-    This implements the expected flow: execute â†’ learn â†’ discover â†’ refine.
-    """
-    try:
-        # Step 1: Execute initial query
-        result = await execute_kql_query(query)
-
-        # Step 2: Extract and learn from context
-        if user_context:
-            context = await extract_context_from_prompt(user_context)
-            await learn_from_data(result, context)
-
-        # Step 3: Trigger background schema discovery
-        from .utils import parse_query_entities
-        entities = parse_query_entities(query)
-        cluster, database, tables = entities["cluster"], entities["database"], entities["tables"]
-
-        if cluster and database and tables:
-            asyncio.create_task(_ensure_schema_discovered(cluster, database, tables))
-
-        # Step 4: Generate enhanced query if needed (simplified for now)
-        enhanced_result = {
-            "initial_result": result,
-            "learning_complete": True,
-            "schema_discovery_triggered": bool(tables),
-            "entities_extracted": entities
-        }
-
-        return enhanced_result
-
-    except (ValueError, TypeError, RuntimeError) as e:
-        logger.error("Full flow execution failed: %s", e)
-        return {
-            "initial_result": None,
-            "error": str(e),
-            "learning_complete": False
-        }
-
-
-async def extract_context_from_prompt(user_context: str) -> Dict:
-    """Extract meaningful context from user input for learning."""
-    return {
-        "user_intent": user_context,
-        "needs_refinement": len(user_context.split()) > 10,  # Simple heuristic
-        "context_type": "natural_language"
-    }
-
-
-async def learn_from_data(result_data: Any, context: Dict):
-    """Store learning results in memory for future use."""
-    try:
-
-        memory = get_memory_manager()
-
-        # Convert result to learnable format
-        if isinstance(result_data, list) and result_data:
-            learning_data = {
-                "row_count": len(result_data),
-                "columns": list(result_data[0].keys()) if result_data else [],
-                "success": True,
-                "context": context
-            }
-
-            # Store learning result using the context info
-            memory.store_learning_result(
-                query=context.get("user_intent", ""),
-                result_data=learning_data,
-                execution_type="enhanced_flow_execution"
-            )
-
-    except (ValueError, TypeError, AttributeError) as e:
-        logger.warning("Learning from data failed: %s", e)
+__all__ = [
+    "classify_kusto_error",
+    "dry_run_query",
+    "execute_kql_query",
+    "kql_execute_tool",
+]

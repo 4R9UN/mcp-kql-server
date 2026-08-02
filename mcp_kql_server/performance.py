@@ -178,11 +178,12 @@ class KustoConnectionPool:
     def _create_client(self, cluster_url: str) -> Any:
         """Create a new Kusto client."""
         try:
-            from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
+            from azure.kusto.data import KustoClient
+            from .kql_auth import build_kusto_connection_string
             from .utils import normalize_cluster_uri
 
             normalized_url = normalize_cluster_uri(cluster_url)
-            kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(normalized_url)
+            kcsb = build_kusto_connection_string(normalized_url)
             client = KustoClient(kcsb)
 
             self._stats.connections_created += 1
@@ -372,7 +373,7 @@ class KustoConnectionPool:
     def start_health_checker(self) -> None:
         """
         Start the background health checker thread.
-        
+
         The health checker periodically:
         - Tests connection health using a lightweight query
         - Marks unhealthy connections for recycling
@@ -381,7 +382,7 @@ class KustoConnectionPool:
         if self._health_checker_running:
             logger.warning("[POOL] Health checker already running")
             return
-        
+
         self._health_checker_running = True
         self._health_checker_thread = threading.Thread(
             target=self._health_checker_loop,
@@ -390,7 +391,7 @@ class KustoConnectionPool:
         )
         self._health_checker_thread.start()
         logger.info(
-            "[POOL] Health checker started (interval=%ds)", 
+            "[POOL] Health checker started (interval=%ds)",
             self._health_check_interval
         )
 
@@ -398,7 +399,7 @@ class KustoConnectionPool:
         """Stop the background health checker thread."""
         if not self._health_checker_running:
             return
-        
+
         self._health_checker_running = False
         if self._health_checker_thread and self._health_checker_thread.is_alive():
             # Wait for thread to finish (with timeout)
@@ -415,7 +416,7 @@ class KustoConnectionPool:
             except Exception as e:  # pylint: disable=broad-exception-caught
                 # Must catch all to keep health checker alive
                 logger.error("[POOL] Health check error: %s", e)
-            
+
             # Sleep in small intervals to allow quick shutdown
             for _ in range(self._health_check_interval):
                 if not self._health_checker_running:
@@ -426,10 +427,10 @@ class KustoConnectionPool:
         """Run health checks on all pooled connections."""
         checked = 0
         unhealthy = 0
-        
+
         with self._global_lock:
             cluster_urls = list(self._pools.keys())
-        
+
         for cluster_url in cluster_urls:
             pool_lock = self._get_pool_lock(cluster_url)
             with pool_lock:
@@ -439,7 +440,7 @@ class KustoConnectionPool:
                     is_healthy = self._check_connection_health(conn_info)
                     conn_info.is_healthy = is_healthy
                     conn_info.last_health_check = datetime.now()
-                    
+
                     if not is_healthy:
                         unhealthy += 1
                         logger.warning(
@@ -448,7 +449,7 @@ class KustoConnectionPool:
                         )
                         # Recycle unhealthy connections
                         self._recycle_connection(cluster_url, conn_id)
-        
+
         if checked > 0:
             logger.debug(
                 "[POOL] Health check complete: %d checked, %d unhealthy",
@@ -458,10 +459,10 @@ class KustoConnectionPool:
     def _check_connection_health(self, conn_info: ConnectionInfo) -> bool:
         """
         Check if a connection is healthy using a lightweight query.
-        
+
         Args:
             conn_info: Connection information
-            
+
         Returns:
             True if connection is healthy, False otherwise
         """

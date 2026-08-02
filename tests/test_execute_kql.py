@@ -13,6 +13,7 @@ from azure.kusto.data.exceptions import KustoServiceError
 
 from mcp_kql_server.constants import TEST_CONFIG
 from mcp_kql_server.execute_kql import (
+    _validate_read_only_query,
     execute_kql_query,
     extract_cluster_and_database_from_query,
     extract_tables_from_query,
@@ -66,13 +67,17 @@ class TestExecuteKQL(unittest.TestCase):
             validate_query("")
         self.assertIn("empty", str(context.exception).lower())
 
-    def test_validate_query_suspicious_content(self):
-        """Test query validation with suspicious content."""
-        suspicious_query = f"cluster('{self.test_cluster_uri}').database('{self.test_database}').TestTable; DROP TABLE TestTable"
-        # Current implementation doesn't have strict validation for this case
-        cluster_uri, database = validate_query(suspicious_query)
-        self.assertIsNotNone(cluster_uri)
-        self.assertIsNotNone(database)
+    def test_read_only_validation_allows_queries_and_show_commands(self):
+        """Read-only queries and metadata inspection commands are allowed."""
+        _validate_read_only_query("TestTable | take 10")
+        _validate_read_only_query(".show tables")
+        _validate_read_only_query(".help")
+
+    def test_read_only_validation_rejects_mutating_management_commands(self):
+        """Mutating Kusto management commands are rejected before execution."""
+        for query in (".drop table TestTable", ".ingest into table TestTable <| data", ".alter table TestTable policy retention"):
+            with self.subTest(query=query), self.assertRaises(ValueError):
+                _validate_read_only_query(query)
 
     def test_validate_query_placeholder_cluster(self):
         """Test query validation with placeholder cluster name."""
