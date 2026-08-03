@@ -17,6 +17,7 @@ from mcp_kql_server.utils import (
     get_default_cluster_memory_path,
     get_schema_discovery,
     get_schema_discovery_status,
+    normalize_cluster_uri,
     sanitize_filename,
 )
 
@@ -92,6 +93,19 @@ class TestEdgeCases:
         # Test functions with None schema
         # (Removed tests for validate_projected_columns and validate_all_query_columns)
         pass
+
+    def test_cluster_uri_rejects_unsafe_components(self):
+        """Cluster endpoints must use HTTPS without credentials or URL parameters."""
+        for uri in (
+            "http://cluster.kusto.windows.net",
+            "https://user:password@cluster.kusto.windows.net",
+            "https://cluster.kusto.windows.net?token=value",
+            "https://cluster.kusto.windows.net#fragment",
+        ):
+            with pytest.raises(ValueError):
+                normalize_cluster_uri(uri)
+
+        assert normalize_cluster_uri("cluster.kusto.windows.net") == "https://cluster.kusto.windows.net"
 
 
 class TestSchemaDiscoveryMethods:

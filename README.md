@@ -8,7 +8,7 @@ mcp-name: io.github.4R9UN/mcp-kql-server
 
 A Model Context Protocol (MCP) server that transforms natural language questions into optimized KQL queries with intelligent schema discovery, AI-powered caching, and seamless Azure Data Explorer integration. Simply ask questions in plain English and get instant, accurate KQL queries with context-aware results.
 
-**Latest Version: v2.1.4** - Canonical schema type normalization for sharper NL2KQL accuracy, credential redaction in logs, leaner dependencies, and a single-source package version.
+**Latest Version: v2.1.5** - Policy compliant Azure CLI login and migration to the official MCP Python SDK.
 
 <!-- Badges Section -->
 
@@ -22,9 +22,8 @@ A Model Context Protocol (MCP) server that transforms natural language questions
 [![Security Rating](https://img.shields.io/badge/security-A+-brightgreen.svg)](https://github.com/4R9UN/mcp-kql-server/security)
 [![Code Quality](https://img.shields.io/badge/code%20quality-A-brightgreen.svg)](https://github.com/4R9UN/mcp-kql-server)
 
-[![FastMCP](https://img.shields.io/badge/framework-FastMCP-green.svg)](https://github.com/jlowin/fastmcp)
+[![MCP Python SDK](https://img.shields.io/badge/framework-MCP%20Python%20SDK-green.svg)](https://github.com/modelcontextprotocol/python-sdk)
 [![Azure Data Explorer](https://img.shields.io/badge/Azure-Data%20Explorer-orange.svg)](https://azure.microsoft.com/en-us/services/data-explorer/)
-[![MCP Protocol](https://img.shields.io/badge/MCP-2024--11--05-blue.svg)](https://github.com/anthropics/mcp)
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://github.com/4R9UN/mcp-kql-server/graphs/commit-activity)
 [![MCP Badge](https://lobehub.com/badge/mcp/4r9un-mcp-kql-server?style=for-the-badge)](https://lobehub.com/mcp/4r9un-mcp-kql-server)
 
@@ -60,25 +59,25 @@ graph TD
     A[👤 User Submits KQL Query] --> B{🔍 Query Validation}
     B -->|❌ Invalid| C[📝 Syntax Error Response]
     B -->|✅ Valid| D[🧠 Load Schema Context]
-    
+
     D --> E{💾 Schema Cache Available?}
     E -->|✅ Yes| F[⚡ Load from Memory]
     E -->|❌ No| G[🔍 Discover Schema]
-    
+
     F --> H[🎯 Execute Query]
     G --> I[💾 Cache Schema + AI Context]
     I --> H
-    
+
     H --> J{🎯 Query Success?}
     J -->|❌ Error| K[🚨 Enhanced Error Message]
     J -->|✅ Success| L[📊 Process Results]
-    
+
     L --> M[🎨 Generate Visualization]
     M --> N[📤 Return Results + Context]
-    
+
     K --> O[💡 AI Suggestions]
     O --> N
-    
+
     style A fill:#4a90e2,stroke:#2c5282,stroke-width:2px,color:#ffffff
     style B fill:#7c7c7c,stroke:#4a4a4a,stroke-width:2px,color:#ffffff
     style C fill:#e74c3c,stroke:#c0392b,stroke-width:2px,color:#ffffff
@@ -105,15 +104,15 @@ graph TD
     A[👤 User Requests Schema Discovery] --> B[🔗 Connect to Cluster]
     B --> C[📂 Enumerate Databases]
     C --> D[📋 Discover Tables]
-    
+
     D --> E[🔍 Get Table Schemas]
     E --> F[🤖 AI Analysis]
     F --> G[📝 Generate Descriptions]
-    
+
     G --> H[💾 Store in Memory]
     H --> I[📊 Update Statistics]
     I --> J[✅ Return Summary]
-    
+
     style A fill:#4a90e2,stroke:#2c5282,stroke-width:2px,color:#ffffff
     style B fill:#8e44ad,stroke:#6a1b99,stroke-width:2px,color:#ffffff
     style C fill:#f39c12,stroke:#d68910,stroke-width:2px,color:#ffffff
@@ -130,7 +129,7 @@ graph TD
 ## 📋 Prerequisites
 
 - Python 3.10 or higher
-- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-windows?view=azure-cli-latest&pivots=msi) installed and authenticated (`az login`)
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-windows?view=azure-cli-latest&pivots=msi) installed. Server startup checks the current token and runs plain interactive `az login` only when needed.
 - Access to Azure Data Explorer cluster(s)
 
 ## 🚀 One-Command Installation
@@ -222,9 +221,8 @@ Add to your VSCode MCP configuration:
       "timeout": 300000,
       "env": {
         "FASTMCP_TRANSPORT": "stdio",
-        "MCP_KQL_AUTH_ON_STARTUP": "false",
+        "MCP_KQL_AUTH_ON_STARTUP": "true",
         "MCP_KQL_CHECK_FOR_UPDATES": "false",
-        "MCP_KQL_DEFER_AUTH": "1",
         "MCP_KQL_SKIP_STARTUP_VERSION_CHECK": "1",
         "MCP_KQL_AUTH_CHECK_TIMEOUT_SECONDS": "10",
         "MCP_KQL_AUTH_LOGIN_TIMEOUT_SECONDS": "120",
@@ -245,6 +243,8 @@ Add to your VSCode MCP configuration:
 
 Use shared HTTP when VS Code, GitHub Copilot CLI, agents, or other MCP clients should connect to one persistent MCP KQL server process.
 
+HTTP binds are restricted to loopback by default because tool calls execute with the operator's Azure CLI identity. Put authentication and TLS in a trusted reverse proxy before remote exposure. Non-loopback binding requires the explicit `MCP_KQL_ALLOW_UNAUTHENTICATED_REMOTE_HTTP=true` acknowledgement.
+
 Start the server:
 
 ```bash
@@ -264,7 +264,7 @@ Client configuration:
 }
 ```
 
-### Runtime Settings Added in v2.1.3
+### Runtime Settings
 
 | Option or environment variable | Purpose | Default |
 | --- | --- | --- |
@@ -273,11 +273,24 @@ Client configuration:
 | `--port`, `FASTMCP_PORT` | HTTP bind port | `8000` |
 | `--http-path`, `FASTMCP_STREAMABLE_HTTP_PATH` | Streamable HTTP endpoint path | `/mcp` |
 | `--stateless-http`, `FASTMCP_STATELESS_HTTP` | Stateless HTTP mode for shared deployments | `false` |
-| `--auth-on-startup`, `MCP_KQL_AUTH_ON_STARTUP` | Check Azure CLI auth before startup | `false` |
+| `--auth-on-startup` / `--no-auth-on-startup`, `MCP_KQL_AUTH_ON_STARTUP` | Initialize authentication when the server starts | `true` |
 | `--check-updates`, `MCP_KQL_CHECK_FOR_UPDATES` | Check PyPI for package updates before startup | `false` |
 | `MCP_KQL_AUTH_CHECK_TIMEOUT_SECONDS` | Azure CLI auth check timeout | `10` |
 | `MCP_KQL_AUTH_LOGIN_TIMEOUT_SECONDS` | Interactive Azure login timeout | `120` |
+| `MCP_KQL_AUTH_MODE` | Kusto authentication mode: `azure-cli` or `managed-identity` | `azure-cli` |
+| `AZURE_CLIENT_ID` | Optional user-assigned managed identity client ID | unset |
 | `MCP_KQL_SQLITE_BUSY_TIMEOUT_MS` | SQLite busy timeout for concurrent local MCP instances | `30000` |
+| `MCP_KQL_MAX_CONCURRENT_QUERIES` | Maximum simultaneous Kusto requests per process | `5` |
+| `MCP_KQL_MAX_RESULT_ROWS` | Maximum rows returned in one MCP response | `10000` |
+| `MCP_KQL_MAX_RESULT_BYTES` | Maximum default JSON response size | `2000000` |
+| `MCP_KQL_MAX_CACHE_ENTRIES` | Maximum persisted query-result cache entries | `1000` |
+| `MCP_KQL_MAX_CACHED_RESULT_BYTES` | Maximum size of one cached result | `2000000` |
+| `MCP_KQL_CACHE_RESULTS` | Persist bounded query results in local SQLite | `true` |
+| `MCP_KQL_EMBEDDING_MODEL` | Sentence Transformers model used for semantic retrieval | `all-MiniLM-L6-v2` |
+| `MCP_KQL_LOG_LEVEL` | Server log level written to stderr | `INFO` |
+| `MCP_KQL_ALLOW_UNAUTHENTICATED_REMOTE_HTTP` | Explicitly permit a non-loopback HTTP bind | `false` |
+
+The embedding model is lazy loaded. Changing it causes schemas to be re-embedded on refresh, and vectors produced by other models are ignored rather than mixed.
 
 ### Roo-code Or Cline (VS-code Extentions)
 
@@ -321,16 +334,16 @@ python -m mcp_kql_server --transport http --host 127.0.0.1 --port 8000 --http-pa
 ```
 ## 🔧 Quick Start
 
-### 1. Authenticate with Azure (One-time setup)
-
-```bash
-az login
-```
-
-### 2. Start the MCP Server (Zero configuration)
+### 1. Start the MCP Server (Zero configuration)
 
 ```bash
 python -m mcp_kql_server
+```
+
+Server startup begins an Azure CLI token check in the background and runs plain interactive `az login` only when needed. Kusto tool calls never launch login; they wait for that startup task before executing. To authenticate manually before starting the server, run:
+
+```bash
+az login
 ```
 
 To inspect the installed server version and runtime defaults:
@@ -343,7 +356,7 @@ The server starts immediately with:
 - 📁 **Auto-created memory path**: `%APPDATA%\KQL_MCP\cluster_memory`
 - 🔧 **Optimized defaults**: No configuration files needed
 - 🔐 **Secure setup**: Uses your existing Azure CLI credentials
-- ⚡ **Fast startup**: Auth and update checks are deferred unless explicitly enabled
+- ⚡ **Responsive startup**: MCP discovery starts immediately while authentication initializes in the background
 
 ### 3. Use via MCP Client
 
@@ -426,34 +439,34 @@ Ask your MCP client:
 }}}%%
 graph LR
     Client["🖥️ MCP Client<br/><b>Claude / AI / Custom</b><br/>─────────<br/>Natural Language<br/>Interface"]
-    
+
     subgraph Server["🚀 MCP KQL Server"]
         direction TB
         FastMCP["⚡ FastMCP<br/>Framework<br/>─────────<br/>MCP Protocol<br/>Handler"]
         NL2KQL["🧠 NL2KQL<br/>Engine<br/>─────────<br/>AI Query<br/>Generation"]
         Executor["⚙️ Query<br/>Executor<br/>─────────<br/>Validation &<br/>Execution"]
         Memory["💾 Schema<br/>Memory<br/>─────────<br/>AI Cache"]
-        
+
         FastMCP --> NL2KQL
         NL2KQL --> Executor
         Executor --> Memory
         Memory --> Executor
     end
-    
+
     subgraph Azure["☁️ Azure Services"]
         direction TB
         ADX["📊 Azure Data<br/>Explorer<br/>─────────<br/><b>Kusto Cluster</b><br/>KQL Engine"]
-        Auth["🔐 Azure<br/>Identity<br/>─────────<br/>Device Code<br/>CLI Auth"]
+        Auth["🔐 Azure<br/>Identity<br/>─────────<br/>Interactive<br/>CLI Auth"]
     end
-    
+
     %% Client to Server
     Client ==>|"📡 MCP Protocol<br/>stdio or streamable HTTP"| FastMCP
-    
+
     %% Server to Azure
     Executor ==>|"🔍 Execute KQL<br/>Query & Analyze"| ADX
     Executor -->|"🔐 Authenticate"| Auth
     Memory -.->|"📥 Fetch Schema<br/>On Demand"| ADX
-    
+
     %% Styling - Using cyberpunk palette
     style Client fill:#1a1a2e,stroke:#00d9ff,stroke-width:4px,color:#00ffff
     style FastMCP fill:#16213e,stroke:#c77dff,stroke-width:3px,color:#c77dff
@@ -462,7 +475,7 @@ graph LR
     style Memory fill:#0f3460,stroke:#00d9ff,stroke-width:3px,color:#00d9ff
     style ADX fill:#1a1a2e,stroke:#ff6600,stroke-width:4px,color:#ff6600
     style Auth fill:#16213e,stroke:#00ffff,stroke-width:2px,color:#00ffff
-    
+
     style Server fill:#0a0e27,stroke:#9d4edd,stroke-width:3px,stroke-dasharray: 5 5
     style Azure fill:#0a0e27,stroke:#ff6600,stroke-width:3px,stroke-dasharray: 5 5
 ```
@@ -526,7 +539,7 @@ mcp-kql-server/
 
 ## 🔒 Security
 
-- **Azure CLI Authentication**: Leverages your existing Azure device login
+- **Azure CLI Authentication**: Reuses an existing token or starts interactive browser login
 - **No Credential Storage**: Server doesn't store authentication tokens
 - **Local Memory**: Schema cache stored locally, not transmitted
 
@@ -546,7 +559,7 @@ mcp-kql-server/
    # you can clear the cache directory, and it will be rebuilt on the next query.
    # Windows:
    rmdir /s /q "%APPDATA%\KQL_MCP\unified_memory.json"
-   
+
    # macOS/Linux:
    rm -rf ~/.local/share/KQL_MCP/cluster_memory
    ```
@@ -558,7 +571,7 @@ mcp-kql-server/
 
 ## 🤝 Contributing
 
-We welcome contributions! Please do. 
+We welcome contributions! Please do.
 
 ## 📞 Support
 

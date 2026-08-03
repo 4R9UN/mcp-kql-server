@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -80,12 +81,14 @@ RANKING_TOKEN_SYNONYMS = {
     "process": {"process", "processes", "command", "cmd"},
 }
 
+DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
 class SemanticSearch:
     """Handles embedding generation and similarity search with optimized loading."""
     _instance = None
     _instance_lock = threading.Lock()
 
-    def __new__(cls, model_name='all-MiniLM-L6-v2'):
+    def __new__(cls, model_name=None):
         """Singleton pattern to share model across instances."""
         with cls._instance_lock:
             if cls._instance is None:
@@ -93,10 +96,12 @@ class SemanticSearch:
                 cls._instance._initialized = False  # pylint: disable=protected-access
             return cls._instance
 
-    def __init__(self, model_name='all-MiniLM-L6-v2'):
+    def __init__(self, model_name=None):
         if getattr(self, '_initialized', False):
             return
-        self.model_name = model_name
+        self.model_name = model_name or os.environ.get(
+            "MCP_KQL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
+        )
         self.model = None
         self._loading = False
         self._load_lock = threading.Lock()
@@ -176,14 +181,27 @@ class MemoryManager:
         base_dir.mkdir(parents=True, exist_ok=True)
         return base_dir / "kql_memory.db"
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open a SQLite connection tuned for concurrent MCP instances."""
+    def _embedding_model_name(self) -> str:
+        """Return a stable model identifier even when semantic search is mocked."""
+        model_name = getattr(self.semantic_search, "model_name", None)
+        return model_name if isinstance(model_name, str) else DEFAULT_EMBEDDING_MODEL
+
+    @contextmanager
+    def _connect(self):
+        """Open, commit or roll back, and always close a SQLite connection."""
         busy_timeout_ms = int(os.environ.get("MCP_KQL_SQLITE_BUSY_TIMEOUT_MS", "30000"))
         conn = sqlite3.connect(self.db_path, timeout=busy_timeout_ms / 1000)
-        conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
+        try:
+            conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_db(self):
         """Initialize SQLite database schema."""
@@ -199,6 +217,7 @@ class MemoryManager:
                     table_name TEXT,
                     columns_json TEXT,
                     embedding BLOB,
+                    embedding_model TEXT,
                     description TEXT,
                     last_updated TIMESTAMP,
                     PRIMARY KEY (cluster, database, table_name)
@@ -214,6 +233,7 @@ class MemoryManager:
                     query TEXT,
                     description TEXT,
                     embedding BLOB,
+                    embedding_model TEXT,
                     timestamp TIMESTAMP,
                     execution_time_ms REAL
                 )
@@ -286,24 +306,36 @@ class MemoryManager:
         try:
             cursor = conn.execute("PRAGMA table_info(query_cache)")
             existing_columns = {row[1] for row in cursor.fetchall()}
-            
+
             # Add new columns to query_cache if they don't exist
             if 'query_type' not in existing_columns:
                 conn.execute("ALTER TABLE query_cache ADD COLUMN query_type TEXT DEFAULT 'default'")
                 logger.info("Migration: Added query_type column to query_cache")
-            
+
             if 'ttl_seconds' not in existing_columns:
                 conn.execute("ALTER TABLE query_cache ADD COLUMN ttl_seconds INTEGER DEFAULT 300")
                 logger.info("Migration: Added ttl_seconds column to query_cache")
-            
+
             if 'cluster' not in existing_columns:
                 conn.execute("ALTER TABLE query_cache ADD COLUMN cluster TEXT")
                 logger.info("Migration: Added cluster column to query_cache")
-            
+
             if 'database' not in existing_columns:
                 conn.execute("ALTER TABLE query_cache ADD COLUMN database TEXT")
                 logger.info("Migration: Added database column to query_cache")
-                
+
+            for table_name in ("schemas", "queries"):
+                columns = {
+                    row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                }
+                if "embedding_model" not in columns:
+                    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN embedding_model TEXT")
+                conn.execute(
+                    f"UPDATE {table_name} SET embedding_model = ? "
+                    "WHERE embedding IS NOT NULL AND embedding_model IS NULL",
+                    (DEFAULT_EMBEDDING_MODEL,),
+                )
+
             conn.commit()
         except sqlite3.OperationalError as e:
             logger.debug("Migration check for query_cache: %s", e)
@@ -354,7 +386,7 @@ class MemoryManager:
 
             existing_row = conn.execute(
                 """
-                SELECT columns_json, description
+                SELECT columns_json, description, embedding_model
                 FROM schemas
                 WHERE cluster=? AND database=? AND table_name=?
                 """,
@@ -368,7 +400,12 @@ class MemoryManager:
                 logger.debug("Skipping empty schema overwrite for %s in %s", table, database)
                 return
 
-            if existing_columns == columns and (description == (existing_row[1] if existing_row else description)):
+            if (
+                existing_columns == columns
+                and description == (existing_row[1] if existing_row else description)
+                and existing_row
+                and existing_row[2] == self._embedding_model_name()
+            ):
                 self.register_table_location(table, normalized_cluster, database)
                 logger.debug("Schema already indexed for %s in %s, skipping reindex", table, database)
                 return
@@ -381,10 +418,10 @@ class MemoryManager:
 
             conn.execute("""
                 INSERT OR REPLACE INTO schemas
-                (cluster, database, table_name, columns_json, embedding, description, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                (cluster, database, table_name, columns_json, embedding, embedding_model, description, last_updated)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (normalized_cluster, database, table, json.dumps(columns),
-                  embedding, description, datetime.now().isoformat()))
+                                    embedding, self._embedding_model_name(), description, datetime.now().isoformat()))
 
         cache_key = f"db_schema_{normalized_cluster}_{database}"
         if hasattr(self, '_schema_cache'):
@@ -407,10 +444,10 @@ class MemoryManager:
 
             conn.execute("""
                 INSERT INTO queries
-                (cluster, database, query, description, embedding, timestamp, execution_time_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                (cluster, database, query, description, embedding, embedding_model, timestamp, execution_time_ms)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (normalized_cluster, database, query, description, embedding,
-                  datetime.now().isoformat(), execution_time_ms))
+                                    self._embedding_model_name(), datetime.now().isoformat(), execution_time_ms))
 
     def add_global_successful_query(self, cluster: str, database: str, query: str,
                                     description: str, execution_time_ms: float = 0.0):
@@ -447,13 +484,15 @@ class MemoryManager:
 
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
-                "SELECT table_name, columns_json, embedding FROM schemas WHERE cluster = ? AND database = ?",
+                "SELECT table_name, columns_json, embedding, embedding_model FROM schemas WHERE cluster = ? AND database = ?",
                 (normalized_cluster, database)
             )
 
             for row in cursor:
-                if row[2]: # If embedding exists
+                if row[2] and row[3] == self._embedding_model_name():
                     tbl_vec = np.frombuffer(row[2], dtype=np.float32)
+                    if tbl_vec.shape != query_vector.shape:
+                        continue
                     norm_q = np.linalg.norm(query_vector)
                     norm_t = np.linalg.norm(tbl_vec)
                     if norm_q > 0 and norm_t > 0:
@@ -481,13 +520,15 @@ class MemoryManager:
 
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
-                "SELECT query, description, embedding FROM queries WHERE cluster = ? AND database = ?",
+                "SELECT query, description, embedding, embedding_model FROM queries WHERE cluster = ? AND database = ?",
                 (normalized_cluster, database)
             )
 
             for row in cursor:
-                if row[2]:
+                if row[2] and row[3] == self._embedding_model_name():
                     row_vector = np.frombuffer(row[2], dtype=np.float32)
+                    if row_vector.shape != query_vector.shape:
+                        continue
                     norm_q1 = np.linalg.norm(query_vector)
                     norm_q2 = np.linalg.norm(row_vector)
                     if norm_q1 > 0 and norm_q2 > 0:
@@ -800,7 +841,7 @@ class MemoryManager:
     ):
         """
         Cache query result with configurable TTL per query type.
-        
+
         Args:
             query: The KQL query string
             result_json: JSON-serialized query results
@@ -809,13 +850,18 @@ class MemoryManager:
             ttl_seconds: Time-to-live in seconds (default: 300)
             cluster: Cluster URL for multi-cluster tracking
             database: Database name for multi-cluster tracking
-        
+
         Query Type TTL Guidelines:
             - 'schema': 3600s (1 hour) - table schemas change infrequently
             - 'aggregation': 600s (10 min) - aggregate queries can be cached longer
             - 'realtime': 60s (1 min) - time-sensitive queries
             - 'default': 300s (5 min) - standard caching
         """
+        max_result_bytes = int(os.environ.get("MCP_KQL_MAX_CACHED_RESULT_BYTES", "2000000"))
+        if len(result_json.encode("utf-8")) > max_result_bytes:
+            logger.info("Skipping query cache entry larger than %d bytes", max_result_bytes)
+            return
+
         query_hash = self._build_cache_key(
             query,
             cluster=cluster,
@@ -835,11 +881,25 @@ class MemoryManager:
 
         with self._lock, self._connect() as conn:
             conn.execute("""
-                INSERT OR REPLACE INTO query_cache 
+                DELETE FROM query_cache
+                WHERE (julianday('now') - julianday(timestamp)) * 86400
+                    > COALESCE(ttl_seconds, 300)
+            """)
+            conn.execute("""
+                INSERT OR REPLACE INTO query_cache
                 (query_hash, result_json, timestamp, row_count, query_type, ttl_seconds, cluster, database)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (query_hash, result_json, datetime.now().isoformat(), row_count,
                   query_type, effective_ttl, normalized_cluster, database))
+            max_entries = max(1, int(os.environ.get("MCP_KQL_MAX_CACHE_ENTRIES", "1000")))
+            conn.execute("""
+                DELETE FROM query_cache
+                WHERE query_hash IN (
+                    SELECT query_hash FROM query_cache
+                    ORDER BY timestamp DESC
+                    LIMIT -1 OFFSET ?
+                )
+            """, (max_entries,))
 
     def get_cached_result(
         self,
@@ -851,11 +911,11 @@ class MemoryManager:
     ) -> Optional[str]:
         """
         Get cached result if valid, respecting stored TTL.
-        
+
         Args:
             query: The KQL query string
             ttl_seconds: Override TTL (if None, uses stored TTL from cache entry)
-        
+
         Returns:
             Cached result JSON string, or None if not cached or expired
         """
@@ -878,6 +938,7 @@ class MemoryManager:
                 effective_ttl = ttl_seconds if ttl_seconds is not None else (row[2] or 300)
                 if (datetime.now() - cached_time).total_seconds() < effective_ttl:
                     return row[0]
+                conn.execute("DELETE FROM query_cache WHERE query_hash = ?", (query_hash,))
         return None
 
     def clear_query_cache(
@@ -917,13 +978,13 @@ class MemoryManager:
             )
             for row in cursor:
                 by_type[row[0] or 'default'] = {"count": row[1], "avg_rows": round(row[2] or 0, 2)}
-            
+
             # Count expired entries
             expired = conn.execute("""
-                SELECT COUNT(*) FROM query_cache 
+                SELECT COUNT(*) FROM query_cache
                 WHERE (julianday('now') - julianday(timestamp)) * 86400 > COALESCE(ttl_seconds, 300)
             """).fetchone()[0]
-            
+
             return {
                 "total_cached": total,
                 "expired_entries": expired,
@@ -934,7 +995,7 @@ class MemoryManager:
         """Remove expired cache entries and return count of removed entries."""
         with self._lock, self._connect() as conn:
             cursor = conn.execute("""
-                DELETE FROM query_cache 
+                DELETE FROM query_cache
                 WHERE (julianday('now') - julianday(timestamp)) * 86400 > COALESCE(ttl_seconds, 300)
             """)
             removed = cursor.rowcount
@@ -1099,7 +1160,7 @@ class MemoryManager:
                 learning_by_type = {row[0]: row[1] for row in cursor.fetchall() if row[0]}
             except sqlite3.OperationalError:
                 pass
-            
+
             # Multi-cluster table count
             multi_cluster_count = 0
             try:
@@ -1108,7 +1169,7 @@ class MemoryManager:
                 ).fetchone()[0]
             except sqlite3.OperationalError:
                 pass
-            
+
             db_size = self.db_path.stat().st_size if self.db_path.exists() else 0
 
         # Include cache stats
@@ -1230,12 +1291,12 @@ class MemoryManager:
     ) -> bool:
         """
         Register a table's location (cluster/database) for multi-cluster support.
-        
+
         Args:
             table_name: Name of the table
             cluster: Cluster URL
             database: Database name
-            
+
         Returns:
             True if registered successfully, False otherwise
         """
@@ -1243,7 +1304,7 @@ class MemoryManager:
             with self._lock, self._connect() as conn:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO table_locations 
+                    INSERT OR REPLACE INTO table_locations
                     (table_name, cluster, database, last_seen)
                     VALUES (?, ?, ?, ?)
                     """,
@@ -1258,10 +1319,10 @@ class MemoryManager:
     def get_table_locations(self, table_name: str) -> List[Dict[str, str]]:
         """
         Get all known locations (cluster/database pairs) for a table.
-        
+
         Args:
             table_name: Name of the table
-            
+
         Returns:
             List of dicts with 'cluster', 'database', 'last_seen' keys
         """
@@ -1269,8 +1330,8 @@ class MemoryManager:
             with self._lock, self._connect() as conn:
                 cursor = conn.execute(
                     """
-                    SELECT cluster, database, last_seen 
-                    FROM table_locations 
+                    SELECT cluster, database, last_seen
+                    FROM table_locations
                     WHERE table_name = ?
                     ORDER BY last_seen DESC
                     """,
@@ -1287,10 +1348,10 @@ class MemoryManager:
     def is_multi_cluster_table(self, table_name: str) -> bool:
         """
         Check if a table exists in multiple clusters.
-        
+
         Args:
             table_name: Name of the table
-            
+
         Returns:
             True if table is found in more than one cluster
         """
@@ -1298,8 +1359,8 @@ class MemoryManager:
             with self._lock, self._connect() as conn:
                 cursor = conn.execute(
                     """
-                    SELECT COUNT(DISTINCT cluster) 
-                    FROM table_locations 
+                    SELECT COUNT(DISTINCT cluster)
+                    FROM table_locations
                     WHERE table_name = ?
                     """,
                     (table_name,)
@@ -1313,7 +1374,7 @@ class MemoryManager:
     def get_all_table_locations(self) -> Dict[str, List[Dict[str, str]]]:
         """
         Get all registered tables and their locations.
-        
+
         Returns:
             Dict mapping table names to lists of location dicts
         """
@@ -1321,8 +1382,8 @@ class MemoryManager:
             with self._lock, self._connect() as conn:
                 cursor = conn.execute(
                     """
-                    SELECT table_name, cluster, database, last_seen 
-                    FROM table_locations 
+                    SELECT table_name, cluster, database, last_seen
+                    FROM table_locations
                     ORDER BY table_name, last_seen DESC
                     """
                 )
@@ -1346,12 +1407,12 @@ class MemoryManager:
     ) -> bool:
         """
         Remove a specific table location entry.
-        
+
         Args:
             table_name: Name of the table
             cluster: Cluster URL
             database: Database name
-            
+
         Returns:
             True if removed successfully
         """
@@ -1359,7 +1420,7 @@ class MemoryManager:
             with self._lock, self._connect() as conn:
                 conn.execute(
                     """
-                    DELETE FROM table_locations 
+                    DELETE FROM table_locations
                     WHERE table_name = ? AND cluster = ? AND database = ?
                     """,
                     (table_name, cluster, database)
@@ -1379,51 +1440,3 @@ def get_memory_manager() -> MemoryManager:
     if _memory_manager is None:
         _memory_manager = MemoryManager()
     return _memory_manager
-
-def get_kql_operator_syntax_guidance() -> str:
-    """
-    Get KQL operator syntax guidance for AI query generation.
-    """
-    return """
-=== KQL GENERATION RULES (STRICT) ===
-1. SCHEMA COMPLIANCE:
-   - You MUST ONLY use columns that explicitly appear in the provided schema.
-   - Do NOT hallucinate column names (e.g., do not assume 'EntityType', 'Target', 'Source' exist unless shown).
-   - If a column is missing, use 'find' or 'search' instead of specific column references, or ask the user to refresh schema.
-
-2. OPERATOR SYNTAX (CRITICAL):
-   - Negation: Use '!=' (not '! ='), '!contains', '!in', '!has'. NO SPACES in negation operators.
-
-   ✓ CORRECT Negation Syntax:
-   - where Status != 'Active' (no space between ! and =)
-   - where Name !contains 'test' (no space between ! and contains)
-   - where Category !in ('A', 'B') (no space between ! and in)
-   - where Title !has 'error' (no space between ! and has)
-
-   ✗ WRONG Negation Syntax (DO NOT USE):
-   - where Status ! = 'Active' (space between ! and =)
-   - where Name ! contains 'test' (space between ! and contains)
-   - where Category ! in ('A', 'B') (space between ! and in)
-   - where Category !has_any ('A', 'B') (!has_any does not exist)
-
-   List Operations:
-   - Use 'in' for membership: where RuleName in ('Rule1', 'Rule2')
-   - Use '!in' for exclusion: where RuleName !in ('Rule1', 'Rule2')
-   - NEVER use '!has_any': !has_any does not exist in KQL
-
-   Alternative Negation (using 'not' keyword):
-   - where not (Status == 'Active')
-   - where not (Name contains 'test')
-
-   String Operators:
-   - has: whole word/term matching (e.g., 'error' matches 'error log' but not 'errors')
-   - contains: substring matching (e.g., 'test' matches 'testing')
-   - startswith: prefix matching
-   - endswith: suffix matching
-   - All can be negated with ! prefix (NO SPACE): !has, !contains, !startswith, !endswith
-
-3. BEST PRACTICES:
-   - Always verify column names against the schema before generating the query.
-   - Use 'take 10' for initial exploration if unsure about data volume.
-   - Prefer 'where Column has "Value"' over 'where Column == "Value"' for text search unless exact match is required.
-"""

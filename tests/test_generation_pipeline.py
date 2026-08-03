@@ -8,6 +8,7 @@ import pytest
 
 from mcp_kql_server.memory import MemoryManager
 from mcp_kql_server import mcp_server
+from mcp_kql_server import result_formatter
 
 
 @pytest.fixture
@@ -260,6 +261,70 @@ async def test_execute_kql_query_repairs_invalid_time_column():
     assert payload["success"] is True
     assert payload["repair_applied"] is True
     assert payload["replacements"]["Timestamp"] == "ReportTime"
+
+
+@pytest.mark.asyncio
+async def test_execute_kql_query_bounds_returned_rows():
+    """Large query results retain total counts while bounding MCP payload rows."""
+    validation = {
+        "valid": True,
+        "errors": [],
+        "warnings": [],
+        "suggestions": [],
+        "tables_used": ["SecurityAlert"],
+        "columns_validated": 1,
+    }
+    dataframe = pd.DataFrame([{"AlertId": str(index)} for index in range(5)])
+
+    with patch.object(mcp_server, "kusto_manager_global", {"authenticated": True}), \
+         patch.object(mcp_server, "kql_execute_tool", return_value=dataframe), \
+         patch.object(mcp_server, "kql_validator", MagicMock()) as mocked_validator, \
+         patch.dict(result_formatter.LIMITS, {"max_result_rows": 2}):
+        mocked_validator.validate_query = AsyncMock(return_value=validation)
+        execute_fn = getattr(mcp_server.execute_kql_query, "fn", mcp_server.execute_kql_query)
+        result = await execute_fn(
+            query="SecurityAlert | project AlertId",
+            cluster_url="cluster.kusto.windows.net",
+            database="db",
+        )
+
+    payload = json.loads(result)
+    assert payload["row_count"] == 2
+    assert payload["total_row_count"] == 5
+    assert payload["truncated"] is True
+    assert len(payload["data"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_kql_query_bounds_json_response_bytes():
+    """Default JSON responses drop rows until the configured byte budget fits."""
+    validation = {
+        "valid": True,
+        "errors": [],
+        "warnings": [],
+        "suggestions": [],
+        "tables_used": ["SecurityAlert"],
+        "columns_validated": 1,
+    }
+    dataframe = pd.DataFrame([{"Description": "x" * 20_000}])
+
+    with patch.object(mcp_server, "kusto_manager_global", {"authenticated": True}), \
+         patch.object(mcp_server, "kql_execute_tool", return_value=dataframe), \
+         patch.object(mcp_server, "kql_validator", MagicMock()) as mocked_validator, \
+         patch.dict(result_formatter.LIMITS, {"max_result_rows": 10, "max_result_bytes": 2_000}):
+        mocked_validator.validate_query = AsyncMock(return_value=validation)
+        execute_fn = getattr(mcp_server.execute_kql_query, "fn", mcp_server.execute_kql_query)
+        result = await execute_fn(
+            query="SecurityAlert | project Description",
+            cluster_url="cluster.kusto.windows.net",
+            database="db",
+        )
+
+    payload = json.loads(result)
+    assert len(result.encode("utf-8")) <= 2_000
+    assert payload["total_row_count"] == 1
+    assert payload["truncated"] is True
+    assert payload["truncation_reason"] == "response_size"
 
 
 @pytest.mark.asyncio

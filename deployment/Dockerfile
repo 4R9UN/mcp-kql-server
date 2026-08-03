@@ -41,4 +41,4 @@ USER mcpuser
 ENV PORT=8000
 EXPOSE 8000
 
-CMD ["python", "-m", "mcp_kql_server"]
+CMD ["python", "-m", "mcp_kql_server", "--transport", "http", "--host", "0.0.0.0", "--port", "8000", "--http-path", "/mcp", "--stateless-http"]

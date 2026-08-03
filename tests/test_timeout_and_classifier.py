@@ -10,7 +10,7 @@ from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 from azure.kusto.data import ClientRequestProperties
-from azure.kusto.data.exceptions import KustoServiceError
+from azure.kusto.data.exceptions import KustoNetworkError, KustoServiceError
 
 from mcp_kql_server import execute_kql
 from mcp_kql_server.constants import (
@@ -32,8 +32,8 @@ class TimeoutClampTests(unittest.TestCase):
         self.assertEqual(execute_kql._clamp_timeout(99999), KUSTO_MAX_QUERY_TIMEOUT_SECONDS)
 
     def test_floor_protects_against_zero_or_negative(self):
-        self.assertEqual(execute_kql._clamp_timeout(0), KUSTO_MAX_QUERY_TIMEOUT_SECONDS)
-        self.assertEqual(execute_kql._clamp_timeout(-5), KUSTO_MAX_QUERY_TIMEOUT_SECONDS)
+        self.assertEqual(execute_kql._clamp_timeout(0), execute_kql.DEFAULT_QUERY_TIMEOUT)
+        self.assertEqual(execute_kql._clamp_timeout(-5), execute_kql.DEFAULT_QUERY_TIMEOUT)
 
     def test_in_range_value_passes_through(self):
         self.assertEqual(execute_kql._clamp_timeout(120), 120)
@@ -45,6 +45,9 @@ class TimeoutClampTests(unittest.TestCase):
 
     def test_constant_is_ten_minutes(self):
         self.assertEqual(KUSTO_MAX_QUERY_TIMEOUT_SECONDS, 600)
+
+    def test_default_query_budget_is_two_minutes(self):
+        self.assertEqual(execute_kql.DEFAULT_QUERY_TIMEOUT, 120)
 
 
 class RequestPropertiesTests(unittest.TestCase):
@@ -181,6 +184,15 @@ class RetryPolicyTests(unittest.TestCase):
 
     def test_arbitrary_runtime_error_is_not_retryable(self):
         self.assertFalse(_is_retryable_exc(RuntimeError("syntax error in query")))
+
+    def test_wrapped_socket_timeout_is_not_retryable(self):
+        try:
+            raise TimeoutError("HTTPS read timed out")
+        except TimeoutError as timeout_error:
+            wrapped = KustoNetworkError("https://cluster", "request-id")
+            wrapped.__cause__ = timeout_error
+
+        self.assertFalse(_is_retryable_exc(wrapped))
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # API Reference - MCP KQL Server
 
-**Version**: 2.1.4
+**Version**: 2.1.5
 **Last Updated**: December 2025
 
 ---
@@ -570,27 +570,35 @@ formatted = schema_mgr.format_schema_for_display(schema_dict)
 
 ### 6.1 Environment Variables
 
-> **Authentication**: This server uses **Azure CLI authentication**. Run `az login` before starting the server. No service principal credentials are required.
+> **Authentication**: At startup, this server checks for an Azure CLI token in the background and runs plain interactive `az login` only when needed. Tool execution waits for that startup task and never starts login itself. No service principal credentials are required.
 
 | Variable | Description | Default |
 |----------|-------------|--------|
-| `KQL_QUERY_TIMEOUT` | Query timeout (seconds) | 300 |
-| `KQL_MAX_ROWS` | Maximum rows returned | 10000 |
-| `KQL_MEMORY_PATH` | Custom memory DB path | Auto |
-| `KQL_LOG_LEVEL` | Logging level | INFO |
-| `KQL_POOL_SIZE` | Connection pool size | 10 |
 | `FASTMCP_TRANSPORT` | Server transport: `stdio`, `http`, `streamable-http`, or `sse` | `stdio` |
 | `FASTMCP_HOST` | HTTP bind host | `127.0.0.1` |
 | `FASTMCP_PORT` | HTTP bind port | `8000` |
 | `FASTMCP_STREAMABLE_HTTP_PATH` | Streamable HTTP endpoint path | `/mcp` |
 | `FASTMCP_STATELESS_HTTP` | Stateless HTTP mode for shared deployments | `false` |
-| `MCP_KQL_AUTH_ON_STARTUP` | Check Azure CLI auth before server startup | `false` |
+| `MCP_KQL_AUTH_ON_STARTUP` | Initialize authentication when the server starts | `true` |
 | `MCP_KQL_CHECK_FOR_UPDATES` | Check PyPI for package updates at startup | `false` |
+| `MCP_KQL_AUTH_CHECK_TIMEOUT_SECONDS` | Azure CLI token-check timeout | `10` |
+| `MCP_KQL_AUTH_LOGIN_TIMEOUT_SECONDS` | Interactive Azure login timeout | `120` |
+| `MCP_KQL_AUTH_MODE` | Kusto authentication mode: `azure-cli` or `managed-identity` | `azure-cli` |
+| `AZURE_CLIENT_ID` | Optional user-assigned managed identity client ID | unset |
 | `MCP_KQL_SQLITE_BUSY_TIMEOUT_MS` | SQLite busy timeout for concurrent MCP instances | `30000` |
+| `MCP_KQL_MAX_CONCURRENT_QUERIES` | Maximum simultaneous Kusto requests per process | `5` |
+| `MCP_KQL_MAX_RESULT_ROWS` | Maximum rows returned in one MCP response | `10000` |
+| `MCP_KQL_MAX_RESULT_BYTES` | Maximum default JSON response size | `2000000` |
+| `MCP_KQL_MAX_CACHE_ENTRIES` | Maximum persisted query-result cache entries | `1000` |
+| `MCP_KQL_MAX_CACHED_RESULT_BYTES` | Maximum size of one cached result | `2000000` |
+| `MCP_KQL_CACHE_RESULTS` | Persist bounded query results in local SQLite | `true` |
+| `MCP_KQL_EMBEDDING_MODEL` | Sentence Transformers model for semantic retrieval | `all-MiniLM-L6-v2` |
+| `MCP_KQL_LOG_LEVEL` | Server log level written to stderr | `INFO` |
+| `MCP_KQL_ALLOW_UNAUTHENTICATED_REMOTE_HTTP` | Explicitly allow non-loopback HTTP binding | `false` |
 
 > **Hardcoded server-side ceiling**: As of v2.1.3 every Kusto call ships
-> `ClientRequestProperties.servertimeout` clamped to `KUSTO_MAX_QUERY_TIMEOUT_SECONDS = 600`
-> (10 minutes). Caller-supplied values above this ceiling are silently clamped.
+> The default query timeout is 120 seconds. `ClientRequestProperties.servertimeout`
+> is clamped to the hard `KUSTO_MAX_QUERY_TIMEOUT_SECONDS = 600` ceiling (10 minutes).
 > See `mcp_kql_server/constants.py` and `mcp_kql_server/execute_kql.py:_build_request_properties`.
 
 ### 6.2 Constants

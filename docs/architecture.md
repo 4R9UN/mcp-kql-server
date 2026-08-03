@@ -1,6 +1,6 @@
 # MCP KQL Server Architecture
 
-**Version**: 2.1.4
+**Version**: 2.1.5
 **Author**: Arjun Trivedi
 **Email**: arjuntrivedi42@yahoo.com
 **Last Updated**: December 2025
@@ -64,7 +64,7 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
                                      │
                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        MCP KQL Server (v2.1.4)                               │
+│                        MCP KQL Server (v2.1.5)                               │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │                         API Layer (mcp_server.py)                       │ │
@@ -84,7 +84,7 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
 │  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘    ││
 │  │                                                                          ││
 │  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    ││
-│  │  │execute_kql.py│ │ ai_prompts.py│ │ kql_auth.py  │ │version_checker│   ││
+│  │  │execute_kql.py│ │  memory.py   │ │ kql_auth.py  │ │version_checker│   ││
 │  │  │(KQL Executor)│ │(AI Templates)│ │(Azure Auth)  │ │ (Updates)    │    ││
 │  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘    ││
 │  └──────────────────────────────────────────────────────────────────────────┘│
@@ -153,12 +153,12 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
 |--------|---------|----------------------|
 | `mcp_server.py` | MCP tool registration & routing | `execute_kql_query()`, `kql_schema_memory` (`schema_memory()` function) |
 | `execute_kql.py` | KQL execution engine | `kql_execute_tool()`, `_get_kusto_client()` |
+| `result_formatter.py` | Bounded MCP result shaping | `limit_result_rows()`, `build_json_result()`, `serialize_bounded_json_result()` |
 | `memory.py` | Persistent schema storage | `MemoryManager`, `SemanticSearch` |
 | `utils.py` | Utilities & helpers | `normalize_cluster_uri()`, `bracket_if_needed()`, `ErrorHandler`, `SchemaManager` |
 | `kql_auth.py` | Azure authentication | `authenticate_kusto()` |
 | `kql_validator.py` | Query validation | `KQLValidator` |
-| `ai_prompts.py` | NL2KQL prompt templates | `build_nl2kql_prompt()` |
-| `constants.py` | Configuration & analyzers | `DynamicSchemaAnalyzer`, `DynamicColumnAnalyzer` |
+| `constants.py` | Shared configuration and KQL constants | Constants and compiled patterns |
 | `performance.py` | Performance optimization | `KustoConnectionPool`, `BatchQueryExecutor` |
 | `version_checker.py` | Auto-update detection | `check_for_updates()`, `startup_version_check()` |
 
@@ -179,7 +179,7 @@ The MCP KQL Server is an AI-augmented service for executing Kusto Query Language
 │        │             │                                               │
 │        │             └────► kql_auth.py ────► Azure Identity         │
 │        │                                                             │
-│        └────► ai_prompts.py ────► constants.py                       │
+│        └────► memory.py ────────► constants.py                       │
 │                                                                      │
 │        ▼                                                             │
 │  performance.py (Connection Pooling, Batch Execution)                │
@@ -206,7 +206,7 @@ sequenceDiagram
     participant Error as ErrorHandler
 
     Client->>Server: execute_kql_query(query, cluster, db)
-    
+
     Note over Server: Phase 1: Authentication
     Server->>Pool: get_client(cluster)
     Pool->>Pool: Check pool for existing connection
@@ -219,12 +219,12 @@ sequenceDiagram
         Pool->>Pool: Add to pool
         Pool->>Server: Return new client
     end
-    
+
     Note over Server: Phase 2: Query Processing
     Server->>Processor: normalize identifiers and cluster URI
     Processor->>Processor: Apply helper-based cleanup
     Processor->>Server: Return normalized inputs
-    
+
     Note over Server: Phase 3: Schema Context
     Server->>Memory: get_relevant_context(cluster, db, query)
     alt Schema cached
@@ -235,11 +235,11 @@ sequenceDiagram
         Memory->>Memory: Cache schema
         Memory->>Server: Return schema
     end
-    
+
     Note over Server: Phase 4: Execution
     Server->>Executor: execute_query(query, client, context)
     Executor->>Azure: Execute KQL
-    
+
     alt Success
         Azure->>Executor: Query results
         Executor->>Memory: Update query history (async)
@@ -259,25 +259,25 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     A[User Natural Language Query] --> B{Has Schema Context?}
-    
+
     B -->|No| C[Discover Schema]
     C --> D[Cache Schema in Memory]
     D --> E[Find Relevant Tables]
-    
+
     B -->|Yes| E
-    
+
     E --> F[Build NL2KQL Prompt]
     F --> G[Include Schema Context]
     G --> H[LLM Generates KQL]
-    
+
     H --> I{Validate Generated KQL}
     I -->|Valid| J[Execute Query]
     I -->|Invalid| K[Return Validation Error]
-    
+
     J --> L{Query Success?}
     L -->|Yes| M[Return Results]
     L -->|No| N[Enhanced Error + Schema Suggestions]
-    
+
     style A fill:#0b102a,stroke:#1a9fd6,stroke-width:3px,color:#d5efff
     style H fill:#141a34,stroke:#ff8244,stroke-width:2px,color:#ffd8ba
     style M fill:#1a1f3b,stroke:#26ffa4,stroke-width:2px,color:#ccfff3
@@ -298,19 +298,19 @@ flowchart LR
         F[refresh_schema] --> DB
         G[generate_report] --> DB
     end
-    
+
     subgraph Storage
         DB --> T[schemas table]
         DB --> Q[queries table]
         DB --> E2[embeddings table]
     end
-    
+
     subgraph Output
         T --> J[JSON Schema]
         Q --> H[Query History]
         E2 --> S[Semantic Search]
     end
-    
+
     style DB fill:#141a34,stroke:#1a9fd6,stroke-width:2px,color:#d5efff
 ```
 
@@ -358,19 +358,19 @@ flowchart LR
 flowchart TD
     A[Batch Query Request] --> B[BatchQueryExecutor]
     B --> C[ThreadPoolExecutor]
-    
+
     C --> D1[Worker 1: Query A]
     C --> D2[Worker 2: Query B]
     C --> D3[Worker 3: Query C]
     C --> D4[Worker N: Query N]
-    
+
     D1 --> E[Aggregate Results]
     D2 --> E
     D3 --> E
     D4 --> E
-    
+
     E --> F[Return BatchQueryResults]
-    
+
     style A fill:#0b102a,stroke:#1a9fd6,stroke-width:2px,color:#d5efff
     style C fill:#141a34,stroke:#ff8244,stroke-width:2px,color:#ffd8ba
     style F fill:#1a1f3b,stroke:#26ffa4,stroke-width:2px,color:#ccfff3
@@ -554,20 +554,20 @@ The server tracks which tables exist in which clusters/databases:
 ```mermaid
 flowchart TD
     A[Start Authentication] --> B{Azure CLI Logged In?}
-    
+
     B -->|Yes| C[Use CLI Token]
-    B -->|No| D[Initiate Device Code Flow]
-    
-    D --> E[Display Device Code URL]
-    E --> F[User Authenticates in Browser]
+    B -->|No| D[Run Interactive az login]
+
+    D --> E[Open Browser Sign In]
+    E --> F[User Authenticates Interactively]
     F --> G[Receive Token]
-    
+
     C --> H[Create KustoClient]
     G --> H
-    
+
     H --> I[Cache Client in Pool]
     I --> J[Ready for Queries]
-    
+
     style A fill:#0b102a,stroke:#1a9fd6,stroke-width:2px,color:#d5efff
     style J fill:#1a1f3b,stroke:#26ffa4,stroke-width:2px,color:#ccfff3
 ```
@@ -594,11 +594,11 @@ mcp_kql_server/
 ├── __main__.py          # Entry point for python -m
 ├── mcp_server.py        # MCP tool definitions
 ├── execute_kql.py       # Query execution engine
+├── result_formatter.py  # Bounded result formatting
 ├── memory.py            # SQLite-backed memory manager
 ├── utils.py             # Utilities (cluster normalization, schema helpers, ErrorHandler)
 ├── kql_auth.py          # Azure authentication
 ├── kql_validator.py     # KQL syntax validation
-├── ai_prompts.py        # NL2KQL prompt templates
 ├── constants.py         # Configuration, analyzers
 ├── performance.py       # Connection pooling, batch execution
 ├── version_checker.py   # Auto-update functionality
@@ -613,19 +613,19 @@ from mcp_kql_server import (
     # Core
     __version__,
     SERVER_NAME,
-    
+
     # Tools
     execute_kql_query,
     schema_memory,
-    
+
     # Memory
     get_memory_manager,
     MemoryManager,
-    
+
     # Performance
     get_connection_pool,
     BatchQueryExecutor,
-    
+
     # Version
     check_for_updates,
     get_current_version,
@@ -636,7 +636,7 @@ from mcp_kql_server import (
 
 ## Conclusion
 
-The MCP KQL Server v2.1.4 architecture provides a robust, performant, and secure foundation for AI-augmented KQL query execution. Key enhancements in this version include:
+The MCP KQL Server v2.1.5 architecture provides a robust, performant, and secure foundation for AI-augmented KQL query execution. Key enhancements in this version include:
 
 - **Configurable TTL Cache**: Query-type-aware caching with automatic expiration
 - **Multi-Cluster Support**: Track and query tables across multiple Azure Data Explorer clusters

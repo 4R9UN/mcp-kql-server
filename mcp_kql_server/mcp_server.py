@@ -7,15 +7,18 @@ Email: arjuntrivedi42@yahoo.com
 """
 # pylint: disable=broad-exception-caught,unused-argument
 
+import asyncio
+import ipaddress
+from io import TextIOWrapper
 import json
 import logging
 import os
 import re
 import difflib
+import sys
+import threading
 from datetime import datetime
 from typing import Dict, Optional, List, Any
-
-import pandas as pd
 
 # Suppress FastMCP banner before import
 os.environ["FASTMCP_QUIET"] = "1"
@@ -23,7 +26,7 @@ os.environ["FASTMCP_NO_BANNER"] = "1"
 os.environ["FASTMCP_SUPPRESS_BRANDING"] = "1"
 os.environ["NO_COLOR"] = "1"
 
-from fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 
 from .constants import (
     SERVER_NAME,
@@ -44,10 +47,49 @@ from .utils import (
     extract_cluster_and_database_from_query,
     redact_secrets,
 )
-from .kql_auth import authenticate_kusto
+from .kql_auth import authenticate_kusto, get_auth_mode
 from .kql_validator import KQLValidator
+from .result_formatter import (
+    build_json_result,
+    limit_result_rows,
+    serialize_bounded_json_result,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class _NonEmptyLineStream:
+    """Pass nonblank stdin lines to the MCP JSON-RPC parser unchanged."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        while True:
+            line = await self._stream.readline()
+            if line == "":
+                raise StopAsyncIteration
+            if line.strip():
+                return line
+
+
+async def _run_stdio_server() -> None:
+    """Run FastMCP stdio while tolerating blank terminal input."""
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    stdin = anyio.wrap_file(
+        TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
+    )
+    async with stdio_server(stdin=_NonEmptyLineStream(stdin)) as (read_stream, write_stream):
+        await mcp._mcp_server.run(  # pylint: disable=protected-access
+            read_stream,
+            write_stream,
+            mcp._mcp_server.create_initialization_options(),  # pylint: disable=protected-access
+        )
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -57,15 +99,33 @@ def _env_flag(name: str, default: bool = False) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _is_loopback_host(host: str) -> bool:
+    """Return whether an HTTP bind host is restricted to this machine."""
+    normalized = (host or "").strip().lower().strip("[]")
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
 # Server-level instructions surfaced to MCP clients (Claude, VS Code, Cursor, ...)
 # in their tool-discovery UI. Keep concise and action-oriented; LLMs use this to
 # decide WHEN to reach for this server.
+_AUTH_INSTRUCTIONS = (
+    "Authentication uses the configured Azure managed identity; no secrets are stored. "
+    if get_auth_mode() == "managed-identity"
+    else "Authentication is via Azure CLI (`az login`); no secrets are stored. "
+)
+
 _SERVER_INSTRUCTIONS = (
     "Run KQL queries against Azure Data Explorer (Kusto) clusters and convert "
     "natural-language questions into validated KQL. Use this server whenever the "
     "user asks about data in Kusto, Azure Monitor, Microsoft Sentinel, Defender "
     "XDR Advanced Hunting, or any '*.kusto.windows.net' cluster. "
-    "Authentication is via Azure CLI (`az login`); no secrets are stored. "
+    + _AUTH_INSTRUCTIONS +
     "Workflow: (1) call `kql_schema_memory` with operation='list_tables' to see "
     "what exists, (2) call it with operation='discover' to cache a table schema, "
     "(3) call `execute_kql_query` to run KQL, optionally with generate_query=true "
@@ -74,9 +134,9 @@ _SERVER_INSTRUCTIONS = (
 
 mcp = FastMCP(
     name=SERVER_NAME,
-    version=__version__,
     instructions=_SERVER_INSTRUCTIONS,
 )
+mcp._mcp_server.version = __version__  # pylint: disable=protected-access
 
 
 def _operation_example(operation: str) -> Dict[str, Any]:
@@ -117,15 +177,72 @@ kql_validator = KQLValidator(memory_manager, schema_manager)
 
 # Global kusto manager - will be set at startup
 kusto_manager_global = None
+_kusto_auth_ready = threading.Event()
+
+
+def _initialize_kusto_authentication(interactive: bool = True) -> None:
+    """Initialize Azure authentication without delaying the MCP handshake."""
+    global kusto_manager_global  # pylint: disable=global-statement
+    try:
+        kusto_manager_global = authenticate_kusto(interactive=interactive)
+        if kusto_manager_global.get("authenticated"):
+            logger.info("[OK] Authentication successful")
+        else:
+            logger.error(
+                "[ERROR] Authentication unavailable: %s",
+                kusto_manager_global.get("message"),
+            )
+    finally:
+        _kusto_auth_ready.set()
+
+
+def _start_kusto_authentication(interactive: bool = True) -> None:
+    """Start the one-time authentication initialization task."""
+    global kusto_manager_global  # pylint: disable=global-statement
+    kusto_manager_global = {
+        "authenticated": False,
+        "initializing": True,
+        "message": "Authentication is initializing at server startup.",
+        "auth_method": get_auth_mode(),
+    }
+    _kusto_auth_ready.clear()
+    threading.Thread(
+        target=_initialize_kusto_authentication,
+        args=(interactive,),
+        name="KustoStartupAuthentication",
+        daemon=True,
+    ).start()
 
 
 def _ensure_kusto_authenticated() -> Dict[str, Any]:
-    """Perform a lazy, non-interactive Azure CLI auth check."""
-    global kusto_manager_global  # pylint: disable=global-statement
-    if isinstance(kusto_manager_global, dict) and kusto_manager_global.get("authenticated"):
+    """Return authentication established before the MCP transport started."""
+    if isinstance(kusto_manager_global, dict):
         return kusto_manager_global
-    kusto_manager_global = authenticate_kusto(interactive=False)
-    return kusto_manager_global
+    return {
+        "authenticated": False,
+        "message": "Startup authentication was not initialized. Restart the MCP server.",
+        "auth_method": get_auth_mode(),
+    }
+
+
+async def _wait_for_kusto_authentication() -> Dict[str, Any]:
+    """Wait for the startup authentication task without blocking MCP I/O."""
+    current_status = _ensure_kusto_authenticated()
+    if current_status.get("authenticated"):
+        return current_status
+    if not _kusto_auth_ready.is_set():
+        wait_seconds = max(
+            1,
+            int(os.environ.get("MCP_KQL_AUTH_READY_TIMEOUT_SECONDS", "135")),
+        )
+        ready = await asyncio.to_thread(_kusto_auth_ready.wait, wait_seconds)
+        if not ready:
+            return {
+                "authenticated": False,
+                "message": "Startup authentication did not complete before the deadline.",
+                "auth_method": get_auth_mode(),
+            }
+    return _ensure_kusto_authenticated()
 
 GENERATION_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "by", "find", "for", "from", "get",
@@ -711,12 +828,13 @@ async def execute_kql_query(
     Returns:
         JSON string. On success contains `data`, `columns`, `row_count`. On
         failure contains `error`, `error_class`, and recovery `suggestions`.
-    Authentication: Requires `az login` first; tokens are never stored.
-    Hard server-side timeout per query: 10 minutes (ADX `servertimeout`).
+    Authentication: Uses the Azure authentication established at server startup;
+    tool execution never launches an interactive login and tokens are never stored.
+    Default query timeout: 2 minutes. Hard server-side ceiling: 10 minutes.
     """
     try:
         repaired_query_info = None
-        auth_status = _ensure_kusto_authenticated()
+        auth_status = await _wait_for_kusto_authentication()
         if not auth_status or not auth_status.get("authenticated"):
             return json.dumps({
                 "success": False,
@@ -724,6 +842,9 @@ async def execute_kql_query(
                 "auth_status": auth_status,
                 "suggestions": ["Run 'az login' in a terminal, then retry the tool call"]
             })
+
+        cluster_url = cluster_url or os.environ.get("KUSTO_CLUSTER_URL")
+        database = database or os.environ.get("KUSTO_DATABASE")
 
         # If caller did not pass cluster/database, try to recover them from any
         # `cluster('x').database('y').Table` prefix already in the query text.
@@ -770,7 +891,8 @@ async def execute_kql_query(
                 return ErrorHandler.safe_json_dumps(generated_result, indent=2)
 
         # Check cache for non-generate queries (fast path)
-        if not generate_query and output_format == "json":
+        cache_results_enabled = _env_flag("MCP_KQL_CACHE_RESULTS", True)
+        if cache_results_enabled and not generate_query and output_format == "json":
             try:
                 cached = memory_manager.get_cached_result(
                     query,
@@ -781,7 +903,13 @@ async def execute_kql_query(
                 )
                 if cached:
                     logger.info("Returning cached result for query")
-                    return cached
+                    try:
+                        cached_payload = json.loads(cached)
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning("Ignoring malformed cached query result")
+                    else:
+                        if isinstance(cached_payload, dict):
+                            return serialize_bounded_json_result(cached_payload)
             except Exception:
                 pass  # Cache miss, continue with execution
 
@@ -845,7 +973,12 @@ async def execute_kql_query(
         # Execute query with proper exception handling
         df = None  # ensures `df` is bound for downstream type-checkers
         try:
-            df = kql_execute_tool(kql_query=query, cluster_uri=cluster_url, database=database)
+            df = await asyncio.to_thread(
+                kql_execute_tool,
+                kql_query=query,
+                cluster_uri=cluster_url,
+                database=database,
+            )
         except Exception as exec_error:
             error_str_raw = str(exec_error)
             error_class = classify_kusto_error(error_str_raw)
@@ -877,7 +1010,8 @@ async def execute_kql_query(
                             list(repaired["replacements"].values()),
                         )
                         try:
-                            df = kql_execute_tool(
+                            df = await asyncio.to_thread(
+                                kql_execute_tool,
                                 kql_query=repaired["query"],
                                 cluster_uri=cluster_url,
                                 database=database,
@@ -953,77 +1087,37 @@ async def execute_kql_query(
             }
             return json.dumps(result, indent=2)
 
+        df, total_row_count, truncated = limit_result_rows(df)
+
         # Return results
         if output_format == "csv":
             return df.to_csv(index=False)
         elif output_format == "table":
             return df.to_string(index=False)
         else:
-            # Convert DataFrame to serializable format with proper type handling
-            def convert_dataframe_to_serializable(df):
-                """Convert DataFrame to JSON-serializable format."""
-                try:
-                    # Convert to records and handle timestamps/types properly
-                    records = []
-                    for _, row in df.iterrows():
-                        record = {}
-                        for col, value in row.items():
-                            if pd.isna(value):
-                                record[col] = None
-                            elif hasattr(value, 'isoformat'):  # Timestamp objects
-                                record[col] = value.isoformat()
-                            elif hasattr(value, 'strftime'):  # datetime objects
-                                record[col] = value.strftime('%Y-%m-%d %H:%M:%S')
-                            elif isinstance(value, type):  # type objects
-                                record[col] = value.__name__
-                            elif hasattr(value, 'item'):  # numpy types
-                                record[col] = value.item()
-                            else:
-                                record[col] = value
-                        records.append(record)
-                    return records
-                except (ValueError, TypeError, AttributeError) as e:
-                    logger.warning("DataFrame conversion failed: %s", e)
-                    # Fallback: convert to string representation
-                    return df.astype(str).to_dict("records")
-
-            # Import special tokens for structured output
-            from .constants import SPECIAL_TOKENS
-            
-            # Build column tokens with type information for LLM understanding
-            column_tokens = [
-                f"{SPECIAL_TOKENS['COLUMN']}:{col}" for col in df.columns.tolist()[:15]
-            ]
-            
-            result = {
-                "success": True,
-                "row_count": len(df),
-                "columns": df.columns.tolist(),
-                "column_tokens": column_tokens,
-                "data": convert_dataframe_to_serializable(df),
-                "result_context": f"{SPECIAL_TOKENS['RESULT_START']}Returned {len(df)} rows with {len(df.columns)} columns{SPECIAL_TOKENS['RESULT_END']}",
-                "requested_auth_method": requested_auth_method,
-                "active_auth_method": active_auth_method
-            }
-            if repair_metadata:
-                result["repair_applied"] = True
-                result["replacements"] = repair_metadata["replacements"]
-                result["schema_grounded_table"] = repair_metadata["table_name"]
-                result["preferred_time_column"] = repair_metadata["preferred_time_column"]
+            result = build_json_result(
+                df,
+                total_row_count,
+                truncated,
+                requested_auth_method,
+                active_auth_method,
+                repair_metadata,
+            )
 
             # Cache successful result for future queries
-            result_json = ErrorHandler.safe_json_dumps(result, indent=2)
-            try:
-                memory_manager.cache_query_result(
-                    query,
-                    result_json,
-                    len(df),
-                    cluster=cluster_url,
-                    database=database,
-                    cache_namespace=f"execute:{output_format}",
-                )
-            except Exception:
-                pass  # Don't fail on cache errors
+            result_json = serialize_bounded_json_result(result)
+            if cache_results_enabled:
+                try:
+                    memory_manager.cache_query_result(
+                        query,
+                        result_json,
+                        len(df),
+                        cluster=cluster_url,
+                        database=database,
+                        cache_namespace=f"execute:{output_format}",
+                    )
+                except Exception:
+                    pass  # Don't fail on cache errors
 
             return result_json
 
@@ -1058,19 +1152,19 @@ async def _generate_kql_from_natural_language(
     IMPORTANT: This function ONLY uses columns from the discovered schema memory.
     It never hardcodes table names, cluster URLs, or column names.
     All data comes from schema_manager and memory_manager.
-    
+
     COLUMN VALIDATION:
     - Only columns that exist in the table schema are projected
     - KQL reserved words are filtered out from potential column matches
     - All generated queries use schema-validated columns only
-    
+
     SPECIAL TOKENS:
     - Uses structured tokens for better LLM parsing and context understanding
     - <CLUSTER>, <DATABASE>, <TABLE>, <COLUMN> tags for semantic clarity
     - <KQL> tags wrap the generated query for easy extraction
     """
     from .constants import SPECIAL_TOKENS
-    
+
     try:
         intent = _detect_generation_intent(natural_language_query)
         cag_bundle = memory_manager.build_cag_bundle(
@@ -1299,10 +1393,11 @@ async def _generate_kql_from_natural_language(
     name=TOOL_KQL_SCHEMA_NAME,
     title="KQL Schema Memory & Discovery (Kusto)",
     annotations={
-        "readOnlyHint": True,
+        # clear_cache and cleanup_cache mutate local persisted memory.
+        "readOnlyHint": False,
         "openWorldHint": True,
         "idempotentHint": True,
-        "destructiveHint": False,
+        "destructiveHint": True,
     },
 )
 async def schema_memory(
@@ -1344,21 +1439,25 @@ async def schema_memory(
     Returns:
         JSON string with operation-specific payload, plus `success` and
         `suggestions` on failure.
-    Authentication: Requires `az login` first.
+    Authentication: Uses the Azure authentication established at server startup.
     """
     try:
-        auth_status = _ensure_kusto_authenticated()
-        if not auth_status or not auth_status.get("authenticated"):
-            return json.dumps({
-                "success": False,
-                "error": "Authentication required",
-                "auth_status": auth_status,
-                "suggestions": [
-                    "Ensure Azure CLI is installed and authenticated",
-                    "Run 'az login' in a terminal, then retry the tool call",
-                    "Check your Azure permissions"
-                ]
-            })
+        cluster_url = cluster_url or os.environ.get("KUSTO_CLUSTER_URL")
+        database = database or os.environ.get("KUSTO_DATABASE")
+
+        if operation in {"discover", "list_tables", "get_context", "refresh_schema"}:
+            auth_status = await _wait_for_kusto_authentication()
+            if not auth_status or not auth_status.get("authenticated"):
+                return json.dumps({
+                    "success": False,
+                    "error": "Authentication required",
+                    "auth_status": auth_status,
+                    "suggestions": [
+                        "Ensure Azure CLI is installed and authenticated",
+                        "Run 'az login' in a terminal, then retry the tool call",
+                        "Check your Azure permissions"
+                    ]
+                })
 
         # Normalize cluster_url so callers can pass either bare hostname
         # ("c.kusto.windows.net") or full URL ("https://c.kusto.windows.net").
@@ -1671,7 +1770,7 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 async def _schema_discover_operation(cluster_url: str, database: str, table_name: str) -> str:
     """Discover and cache schema for a table with LLM-friendly special tokens."""
     from .constants import SPECIAL_TOKENS
-    
+
     try:
         schema_info = await schema_manager.get_table_schema(cluster_url, database, table_name)
 
@@ -1682,7 +1781,7 @@ async def _schema_discover_operation(cluster_url: str, database: str, table_name
                 f"{SPECIAL_TOKENS['COLUMN']}:{col}|{SPECIAL_TOKENS['TYPE']}:{info.get('data_type', 'unknown')}"
                 for col, info in list(columns.items())[:20]  # Limit to 20 columns for token efficiency
             ]
-            
+
             return json.dumps({
                 "success": True,
                 "message": f"{SPECIAL_TOKENS['TABLE_START']}{table_name}{SPECIAL_TOKENS['TABLE_END']} schema discovered and cached",
@@ -1705,15 +1804,15 @@ async def _schema_discover_operation(cluster_url: str, database: str, table_name
 async def _schema_list_tables_operation(cluster_url: str, database: str) -> str:
     """List all tables in a database with LLM-friendly special tokens."""
     from .constants import SPECIAL_TOKENS
-    
+
     try:
         from .utils import SchemaDiscovery
         discovery = SchemaDiscovery(memory_manager)
         tables = await discovery.list_tables_in_db(cluster_url, database)
-        
+
         # Format tables with special tokens for better LLM parsing
         table_tokens = [f"{SPECIAL_TOKENS['TABLE_START']}{t}{SPECIAL_TOKENS['TABLE_END']}" for t in tables[:30]]
-        
+
         return json.dumps({
             "success": True,
             "schema_context": f"{SPECIAL_TOKENS['CLUSTER_START']}{cluster_url}{SPECIAL_TOKENS['CLUSTER_END']}{SPECIAL_TOKENS['SEPARATOR']}{SPECIAL_TOKENS['DATABASE_START']}{database}{SPECIAL_TOKENS['DATABASE_END']}",
@@ -1981,7 +2080,7 @@ async def _schema_cache_stats_operation() -> str:
                 "by_query_type": "Breakdown by query type (schema, aggregation, realtime, etc.)",
                 "ttl_settings": {
                     "schema": "3600s (1 hour) - Schema queries",
-                    "aggregation": "600s (10 minutes) - Aggregation queries",
+                    "aggregation": "120s (2 minutes) - Aggregation queries",
                     "realtime": "60s (1 minute) - Real-time queries",
                     "default": "300s (5 minutes) - Other queries"
                 }
@@ -2015,14 +2114,14 @@ async def _schema_list_multi_cluster_tables_operation() -> str:
     """List all tables with their known cluster/database locations."""
     try:
         all_locations = memory_manager.get_all_table_locations()
-        
+
         # Identify tables in multiple clusters
         multi_cluster_tables = {
-            table: locations 
-            for table, locations in all_locations.items() 
+            table: locations
+            for table, locations in all_locations.items()
             if len(set(loc["cluster"] for loc in locations)) > 1
         }
-        
+
         return json.dumps({
             "success": True,
             "total_tables_tracked": len(all_locations),
@@ -2046,6 +2145,7 @@ def _print_info(as_json: bool = False) -> None:
     """
     from .version_checker import get_current_version
     from . import constants as C
+    from mcp.types import LATEST_PROTOCOL_VERSION
 
     # Discover tools registered with FastMCP. Fall back to a static list if
     # the FastMCP API surface changes between versions.
@@ -2076,9 +2176,13 @@ def _print_info(as_json: bool = False) -> None:
     config = {
         "server_name": C.SERVER_NAME,
         "server_version": get_current_version(),
-        "mcp_protocol_version": C.MCP_PROTOCOL_VERSION,
+        "mcp_protocol_version": LATEST_PROTOCOL_VERSION,
         "transport": "stdio (FastMCP)",
-        "auth": "Azure CLI (az login). No secrets stored.",
+        "auth": (
+            "Azure managed identity. No secrets stored."
+            if get_auth_mode() == "managed-identity"
+            else "Azure CLI (az login). No secrets stored."
+        ),
         "memory_path": C.format_display_path(C.DEFAULT_MEMORY_PATH),
         "default_kusto_domain": C.DEFAULT_KUSTO_DOMAIN,
         "connection_timeout_sec": C.DEFAULT_CONNECTION_TIMEOUT,
@@ -2090,6 +2194,19 @@ def _print_info(as_json: bool = False) -> None:
         "max_columns_per_table": C.MAX_COLUMNS_PER_TABLE,
         "max_query_length": C.MAX_QUERY_LENGTH,
         "min_query_length": C.MIN_QUERY_LENGTH,
+        "max_concurrent_queries": int(os.environ.get(
+            "MCP_KQL_MAX_CONCURRENT_QUERIES", C.LIMITS["max_concurrent_queries"]
+        )),
+        "max_result_rows": int(os.environ.get(
+            "MCP_KQL_MAX_RESULT_ROWS", C.LIMITS["max_result_rows"]
+        )),
+        "max_result_bytes": int(os.environ.get(
+            "MCP_KQL_MAX_RESULT_BYTES", C.LIMITS["max_result_bytes"]
+        )),
+        "max_cache_entries": int(os.environ.get("MCP_KQL_MAX_CACHE_ENTRIES", "1000")),
+        "query_result_cache_enabled": _env_flag("MCP_KQL_CACHE_RESULTS", True),
+        "embedding_model": memory_manager.semantic_search.model_name,
+        "remote_http_requires_explicit_acknowledgement": True,
     }
 
     if as_json:
@@ -2130,6 +2247,12 @@ def main():
     import argparse
 
     from .version_checker import get_current_version
+
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("MCP_KQL_LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+    )
 
     parser = argparse.ArgumentParser(
         prog="mcp-kql-server",
@@ -2181,9 +2304,12 @@ def main():
     )
     parser.add_argument(
         "--auth-on-startup",
-        action="store_true",
-        default=_env_flag("MCP_KQL_AUTH_ON_STARTUP", False),
-        help="Check Azure CLI auth before starting. Disabled by default for faster MCP discovery.",
+        action=argparse.BooleanOptionalAction,
+        default=_env_flag("MCP_KQL_AUTH_ON_STARTUP", True),
+        help=(
+            "Initialize authentication at startup (default). Use "
+            "--no-auth-on-startup only for local cache operations."
+        ),
     )
     parser.add_argument(
         "--check-updates",
@@ -2199,6 +2325,20 @@ def main():
     if args.info:
         _print_info(as_json=args.json)
         return
+
+    transport = (args.transport or "stdio").strip().lower()
+    if transport == "http":
+        transport = "streamable-http"
+    if (
+        transport in {"streamable-http", "sse"}
+        and not _is_loopback_host(args.host)
+        and not _env_flag("MCP_KQL_ALLOW_UNAUTHENTICATED_REMOTE_HTTP", False)
+    ):
+        parser.error(
+            "Remote HTTP binding is disabled because requests use the server's Azure identity. "
+            "Bind to 127.0.0.1/localhost or explicitly set "
+            "MCP_KQL_ALLOW_UNAUTHENTICATED_REMOTE_HTTP=true after adding a trusted network boundary."
+        )
 
     from .version_checker import startup_version_check
 
@@ -2222,37 +2362,40 @@ def main():
 
     try:
         if args.auth_on_startup:
-            kusto_manager_global = authenticate_kusto(interactive=False)
+            _start_kusto_authentication(interactive=True)
         else:
-            kusto_manager_global = {"authenticated": False, "message": "Auth check deferred until first Kusto tool call"}
+            kusto_manager_global = {
+                "authenticated": False,
+                "message": "Startup authentication disabled; restart without --no-auth-on-startup to query Kusto.",
+                "auth_method": get_auth_mode(),
+            }
 
-        if kusto_manager_global.get("authenticated"):
-            logger.info("[OK] Authentication successful")
-            logger.info("[OK] MCP KQL Server ready")
+            _kusto_auth_ready.set()
+
+        if not args.auth_on_startup:
+            logger.error("[ERROR] Authentication unavailable: %s", kusto_manager_global.get("message"))
+            logger.info("[OK] MCP KQL Server ready for local schema-memory operations only")
         else:
-            logger.info("[OK] Authentication deferred. Run 'az login' before executing KQL.")
+            logger.info("[OK] Authentication initialization started")
             logger.info("[OK] MCP KQL Server ready")
 
         # Log available tools
         logger.info("Available tools: %s", ", ".join(REGISTERED_TOOL_NAMES))
         logger.info("=" * 60)
 
-        transport = (args.transport or "stdio").strip().lower()
-        if transport == "http":
-            transport = "streamable-http"
-
-        run_kwargs: Dict[str, Any] = {"show_banner": False}
+        run_kwargs: Dict[str, Any] = {}
         if transport in {"streamable-http", "sse"}:
-            run_kwargs.update({
-                "host": args.host,
-                "port": args.port,
-                "stateless_http": args.stateless_http,
-            })
+            mcp.settings.host = args.host
+            mcp.settings.port = args.port
+            mcp.settings.stateless_http = args.stateless_http
             if transport == "streamable-http":
-                run_kwargs["path"] = args.http_path
+                mcp.settings.streamable_http_path = args.http_path
 
         logger.info("Starting FastMCP transport=%s", transport)
-        mcp.run(transport=transport, **run_kwargs)
+        if transport == "stdio":
+            asyncio.run(_run_stdio_server())
+        else:
+            mcp.run(transport=transport, **run_kwargs)
     except (RuntimeError, OSError, ImportError) as e:
         logger.error("[ERROR] Failed to start server: %s", e)
 
