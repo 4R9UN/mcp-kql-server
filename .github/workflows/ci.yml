@@ -24,7 +24,7 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
     - name: Install linter
-      run: pip install ruff
+      run: pip install ruff==0.16.1
     - name: Run linter
       run: ruff check .
 

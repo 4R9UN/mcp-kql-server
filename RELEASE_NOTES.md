@@ -38,6 +38,7 @@
 - Reduces the normal query budget to 120 seconds while retaining the 600 second hard ceiling.
 - Detects timeout causes wrapped by the Azure Kusto SDK and prevents another full retry.
 - Requires lint, package validation, the platform install matrix, and tests before PyPI publishing.
+- Pins Ruff 0.16.1 and explicitly selects the established correctness rules so local and CI lint results remain consistent.
 
 ### Upgrade
 
