@@ -8,10 +8,10 @@ Email: arjuntrivedi42@yahoo.com
 from pathlib import Path
 import subprocess
 import sys
-import tomllib
 from unittest.mock import patch
 
 import mcp_kql_server
+import toml
 from packaging.requirements import Requirement
 
 from mcp_kql_server import __author__, __email__, __version__ as pkg_version
@@ -47,7 +47,7 @@ def test_version_consistency():
 def test_dependency_bounds_preserve_shared_environment_compatibility():
     """Test package bounds remain compatible with FastAPI and Semantic Kernel."""
     pyproject_path = Path(__file__).parents[1] / "pyproject.toml"
-    dependencies = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))["project"]["dependencies"]
+    dependencies = toml.loads(pyproject_path.read_text(encoding="utf-8"))["project"]["dependencies"]
     requirements = {requirement.name: requirement for requirement in map(Requirement, dependencies)}
 
     assert str(requirements["mcp"].specifier) == "<2.0.0,>=1.28.1"
@@ -61,7 +61,7 @@ def test_dependency_bounds_preserve_shared_environment_compatibility():
 def test_requirements_file_matches_project_dependencies():
     """Keep the pip requirements file aligned with package metadata."""
     project_root = Path(__file__).parents[1]
-    dependencies = tomllib.loads(
+    dependencies = toml.loads(
         (project_root / "pyproject.toml").read_text(encoding="utf-8")
     )["project"]["dependencies"]
     requirement_lines = [
